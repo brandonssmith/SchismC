@@ -85,6 +85,7 @@ void warning(CompilerContext* ctx, const char* message, ...) {
     ctx->warning_count++;
 }
 
+
 ASTNode* parse_program(CompilerContext* ctx) {
     ASTNode* program = create_node(NODE_PROGRAM);
     ASTNode* current = NULL;
@@ -103,6 +104,7 @@ ASTNode* parse_program(CompilerContext* ctx) {
     }
     return program;
 }
+
 
 ASTNode* parse_statement(CompilerContext* ctx) {
     switch (ctx->current_token) {
