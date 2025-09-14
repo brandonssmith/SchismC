@@ -1,0 +1,10 @@
+return;
+return 0;
+return 42;
+return 100;
+return -5;
+return x;
+return y;
+return x + y;
+return x * y;
+return x - y;
