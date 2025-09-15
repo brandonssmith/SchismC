@@ -99,6 +99,10 @@ typedef enum {
     TK_THROW,         /* throw */
     TK_NO_WARN,       /* no_warn */
     
+    /* Boolean literals */
+    TK_TRUE,          /* true */
+    TK_FALSE,         /* false */
+    
     /* Assembly-specific tokens */
     TK_ASM_REG,       /* Assembly register (RAX, EAX, etc.) */
     TK_ASM_OPCODE,    /* Assembly opcode (MOV, ADD, etc.) */

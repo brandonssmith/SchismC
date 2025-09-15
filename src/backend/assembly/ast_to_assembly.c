@@ -102,6 +102,9 @@ Bool ast_to_assembly_node(AssemblyContext *ctx, ASTNode *node) {
         case NODE_BLOCK:
             return ast_to_assembly_block_statement(ctx, node);
             
+        case NODE_IDENTIFIER:
+            return ast_to_assembly_variable_reference(ctx, node);
+            
         case NODE_ASM_BLOCK:
             return ast_to_assembly_inline_assembly(ctx, node);
             
@@ -688,7 +691,7 @@ Bool ast_to_assembly_variable_declaration(AssemblyContext *ctx, ASTNode *node) {
 }
 
 Bool ast_to_assembly_variable_reference(AssemblyContext *ctx, ASTNode *node) {
-    if (!ctx || !node || node->type != NODE_VARIABLE) return false;
+    if (!ctx || !node || (node->type != NODE_VARIABLE && node->type != NODE_IDENTIFIER)) return false;
     
     printf("DEBUG: Generating assembly for variable reference: %s\n", 
            node->data.identifier.name ? (char*)node->data.identifier.name : "unnamed");

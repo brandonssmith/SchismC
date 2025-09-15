@@ -16,6 +16,7 @@ typedef struct {
     size_t output_capacity;      /* Buffer capacity */
     size_t output_size;          /* Current buffer size */
     int indent_level;            /* Current indentation level */
+    int string_counter;          /* Counter for string literal labels */
 } MASMContext;
 
 /* MASM Context Management */
@@ -26,6 +27,7 @@ void masm_context_free(MASMContext *ctx);
 Bool masm_generate_header(MASMContext *ctx);
 Bool masm_generate_entry_point(MASMContext *ctx);
 Bool masm_generate_user_main(MASMContext *ctx);
+Bool masm_generate_user_main_function(MASMContext *ctx, ASTNode *ast);
 Bool masm_generate_footer(MASMContext *ctx);
 
 /* Function-related MASM Generation */

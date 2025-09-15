@@ -32,6 +32,18 @@ extern void Free(void* ptr);
 extern String StrNew(const char* str);
 extern String StrPrint(const char* fmt, ...);
 
+/* Input Functions */
+extern I64 GetI64(const char* prompt, I64 default_val, I64 min_val, I64 max_val);
+extern F64 GetF64(const char* prompt, F64 default_val, F64 min_val, F64 max_val);
+extern I64 GetString(const char* prompt, char* buffer, I64 buffer_size);
+extern void PutChars(const char* str);
+extern void PutChar(char c);
+
+/* Type Conversion Functions */
+extern I64 ToI64(F64 value);
+extern F64 ToF64(I64 value);
+extern Bool ToBool(I64 value);
+
 /* Compiler Control Structure - Based on TempleOS CCmpCtrl */
 typedef struct {
     I64 pass;                    /* Compilation pass number */
@@ -104,8 +116,7 @@ typedef enum {
     TK_LEFT_SHIFT, TK_RIGHT_SHIFT,
     TK_LEFT_SHIFT_EQUAL, TK_RIGHT_SHIFT_EQUAL,
     TK_AND_AND, TK_OR_OR,
-    TK_EQUAL_EQUAL, TK_NOT_EQUAL,
-    TK_LESS_EQUAL, TK_GREATER_EQUAL,
+    TK_EQUAL_EQUAL,
     TK_DEREFERENCE,
     TK_RANGE,                    /* HolyC range operator (..) */
     TK_COUNT

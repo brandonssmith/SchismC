@@ -66,6 +66,10 @@ static Keyword keywords[] = {
     {"throw", TK_THROW},
     {"no_warn", TK_NO_WARN},
     
+    /* Boolean literals */
+    {"true", TK_TRUE},
+    {"false", TK_FALSE},
+    
     /* Built-in types */
     {"I0", TK_TYPE_I0},
     {"I8", TK_TYPE_I8},
@@ -143,6 +147,7 @@ static RegMapping reg_map[] = {
  */
 
 LexerState* lexer_new(FILE *input) {
+    printf("DEBUG: lexer_new - starting\n");
     LexerState *lexer = (LexerState*)malloc(sizeof(LexerState));
     if (!lexer) return NULL;
     
@@ -165,10 +170,16 @@ LexerState* lexer_new(FILE *input) {
     
     /* Load file content into buffer */
     if (input) {
+        printf("DEBUG: lexer_new - loading file into buffer\n");
+        printf("DEBUG: lexer_new - about to seek to end\n");
         fseek(input, 0, SEEK_END);
+        printf("DEBUG: lexer_new - about to get file size\n");
         long file_size = ftell(input);
+        printf("DEBUG: lexer_new - file size: %ld\n", file_size);
+        printf("DEBUG: lexer_new - about to seek to beginning\n");
         fseek(input, 0, SEEK_SET);
         
+        printf("DEBUG: lexer_new - file size: %ld\n", file_size);
         if (file_size > 0) {
             lexer->input_buffer = (U8*)malloc(file_size + 1);
             if (lexer->input_buffer) {
@@ -202,6 +213,7 @@ LexerState* lexer_new(FILE *input) {
         }
     }
     
+    printf("DEBUG: lexer_new - completed successfully\n");
     return lexer;
 }
 
@@ -373,8 +385,13 @@ TokenType lex_get_builtin_type_token(U8 *str) {
  */
 
 TokenType lex_next_token(LexerState *lexer) {
-    if (!lexer) return TK_EOF;
+    printf("DEBUG: lex_next_token - starting\n");
+    if (!lexer) {
+        printf("DEBUG: lex_next_token - lexer is NULL\n");
+        return TK_EOF;
+    }
     
+    printf("DEBUG: lex_next_token - buffer_pos: %lld, buffer_size: %lld\n", lexer->buffer_pos, lexer->buffer_size);
     
     /* Skip whitespace */
     while (lexer->buffer_pos < lexer->buffer_size && 
@@ -681,12 +698,14 @@ TokenType lex_next_token(LexerState *lexer) {
 
 
 static TokenType lex_parse_string(LexerState *lexer) {
+    printf("DEBUG: lex_parse_string - starting\n");
     I64 start_pos = lexer->buffer_pos + 1;  /* Skip opening quote */
     I64 start_col = lexer->buffer_column + 1;
     
     lexer->buffer_pos++;
     lexer->buffer_column++;
     
+    printf("DEBUG: lex_parse_string - searching for closing quote\n");
     while (lexer->buffer_pos < lexer->buffer_size &&
            lexer->input_buffer[lexer->buffer_pos] != '"') {
         if (lexer->input_buffer[lexer->buffer_pos] == '\\') {
@@ -698,6 +717,7 @@ static TokenType lex_parse_string(LexerState *lexer) {
     }
     
     if (lexer->buffer_pos >= lexer->buffer_size) {
+        printf("DEBUG: lex_parse_string - unterminated string\n");
         lex_error(lexer, "Unterminated string literal");
         return TK_EOF;
     }
@@ -710,6 +730,11 @@ static TokenType lex_parse_string(LexerState *lexer) {
     lexer->buffer_column++;
     
     lexer->current_token = TK_STR;
+    printf("DEBUG: lex_parse_string - completed, token value: %s\n", lexer->token_value);
+    printf("DEBUG: lex_parse_string - buffer_pos: %lld, buffer_size: %lld\n", lexer->buffer_pos, lexer->buffer_size);
+    if (lexer->buffer_pos < lexer->buffer_size) {
+        printf("DEBUG: lex_parse_string - next character: '%c' (ASCII %d)\n", lexer->input_buffer[lexer->buffer_pos], lexer->input_buffer[lexer->buffer_pos]);
+    }
     return TK_STR;
 }
 

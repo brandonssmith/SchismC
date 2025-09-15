@@ -29,6 +29,7 @@ MASMContext* masm_context_new(AssemblyContext *asm_ctx) {
     
     ctx->output_size = 0;
     ctx->indent_level = 0;
+    ctx->string_counter = 0;
     
     return ctx;
 }
@@ -91,6 +92,34 @@ static Bool masm_append_line(MASMContext *ctx, const char *line) {
 /*
  * MASM Assembly Generation
  */
+
+Bool masm_generate_user_main_function(MASMContext *ctx, ASTNode *ast) {
+    if (!ctx || !ast) return false;
+    
+    /* Generate user_main function that contains all global statements */
+    masm_append_line(ctx, "; User main function");
+    masm_append_line(ctx, "user_main PROC");
+    ctx->indent_level++;
+    
+    /* Process all global statements */
+    ASTNode *child = ast->children;
+    while (child) {
+        if (!masm_generate_ast_node(ctx, child)) {
+            printf("ERROR: Failed to generate MASM for AST node type %d\n", child->type);
+            return false;
+        }
+        child = child->next;
+    }
+    
+    /* Return 0 */
+    masm_append_line(ctx, "mov rax, 0          ; Return 0");
+    masm_append_line(ctx, "ret");
+    
+    ctx->indent_level--;
+    masm_append_line(ctx, "user_main ENDP");
+    
+    return true;
+}
 
 Bool masm_generate_header(MASMContext *ctx) {
     if (!ctx) return false;
@@ -385,19 +414,269 @@ Bool masm_generate_ast_node(MASMContext *ctx, ASTNode *node) {
             return true;
         }
             
+        case NODE_STRING: {
+            /* Generate string literal - in HolyC, strings are automatically printed */
+            printf("DEBUG: masm_generate_ast_node - processing NODE_STRING\n");
+            if (node->data.literal.str_value) {
+                printf("DEBUG: masm_generate_ast_node - string value: %s\n", node->data.literal.str_value);
+                
+                /* In HolyC, string literals are automatically printed (sent to Print()) */
+                /* Generate assembly to call Print() with the string literal */
+                char str_label[64];
+                snprintf(str_label, sizeof(str_label), "str_literal_%d", ctx->string_counter);
+                
+                /* Add string to data section */
+                char data_line[256];
+                snprintf(data_line, sizeof(data_line), "%s DB \"%s\", 0", str_label, (char*)node->data.literal.str_value);
+                masm_append_line(ctx, data_line);
+                
+                /* Generate call to Print() */
+                char load_line[128];
+                snprintf(load_line, sizeof(load_line), "lea rax, [%s]", str_label);
+                masm_append_line(ctx, load_line);  /* Load string address */
+                masm_append_line(ctx, "call Print");  /* Call Print() function */
+                
+                ctx->string_counter++;  /* Increment counter for next string */
+                
+                printf("DEBUG: masm_generate_ast_node - generated string print assembly\n");
+            } else {
+                printf("DEBUG: masm_generate_ast_node - no string value\n");
+                masm_append_line(ctx, "; String literal: (null)");
+            }
+            printf("DEBUG: masm_generate_ast_node - NODE_STRING completed successfully\n");
+            return true;
+        }
+            
         case NODE_BLOCK:
             /* Generate block statements */
+            printf("DEBUG: masm_generate_ast_node - processing NODE_BLOCK\n");
             if (node->data.block.statements) {
                 ASTNode *stmt = node->data.block.statements;
+                int stmt_count = 0;
                 while (stmt) {
+                    printf("DEBUG: masm_generate_ast_node - processing block statement %d, type %d\n", stmt_count, stmt->type);
                     if (!masm_generate_ast_node(ctx, stmt)) {
                         printf("ERROR: Failed to generate MASM for block statement\n");
                         return false;
                     }
                     stmt = stmt->next;
+                    stmt_count++;
+                }
+                printf("DEBUG: masm_generate_ast_node - processed %d block statements\n", stmt_count);
+            } else {
+                printf("DEBUG: masm_generate_ast_node - no block statements\n");
+            }
+            return true;
+            
+        case NODE_IDENTIFIER: {
+            /* Generate variable reference - load from stack frame */
+            if (node->data.identifier.name) {
+                /* Check if this is a parameter or local variable */
+                if (node->data.identifier.stack_offset >= 0) {
+                    /* Local variable or parameter - load from stack frame */
+                    char mov_instr[128];
+                    snprintf(mov_instr, sizeof(mov_instr), "    mov rax, [rbp%+ld]    ; Load variable %s", 
+                             node->data.identifier.stack_offset, (char*)node->data.identifier.name);
+                    masm_append_line(ctx, mov_instr);
+                } else {
+                    /* Global variable - load from data section */
+                    char mov_instr[128];
+                    snprintf(mov_instr, sizeof(mov_instr), "    mov rax, [%s]    ; Load global variable %s", 
+                             (char*)node->data.identifier.name, (char*)node->data.identifier.name);
+                    masm_append_line(ctx, mov_instr);
+                }
+            } else {
+                /* Fallback for unnamed identifier */
+                masm_append_line(ctx, "    mov rax, 0    ; Unnamed identifier");
+            }
+            return true;
+        }
+            
+        case NODE_VARIABLE: {
+            /* Variable declaration - no code generation needed, just scope management */
+            printf("DEBUG: Processing variable declaration: %s\n", 
+                   node->data.identifier.name ? (char*)node->data.identifier.name : "unnamed");
+            return true;
+        }
+            
+        case NODE_ASSIGNMENT: {
+            /* Generate assignment - evaluate right side, store in left side */
+            if (!masm_generate_ast_node(ctx, node->data.assignment.right)) {
+                printf("ERROR: Failed to generate MASM for assignment right-hand side\n");
+                return false;
+            }
+            
+            /* Store result in the variable on the left side */
+            if (node->data.assignment.left && node->data.assignment.left->data.identifier.name) {
+                if (node->data.assignment.left->data.identifier.stack_offset >= 0) {
+                    /* Local variable or parameter - store in stack frame */
+                    char mov_instr[128];
+                    snprintf(mov_instr, sizeof(mov_instr), "    mov [rbp%+ld], rax    ; Store in variable %s", 
+                             node->data.assignment.left->data.identifier.stack_offset, 
+                             (char*)node->data.assignment.left->data.identifier.name);
+                    masm_append_line(ctx, mov_instr);
+                } else {
+                    /* Global variable - store in data section */
+                    char mov_instr[128];
+                    snprintf(mov_instr, sizeof(mov_instr), "    mov [%s], rax    ; Store in global variable %s", 
+                             (char*)node->data.assignment.left->data.identifier.name,
+                             (char*)node->data.assignment.left->data.identifier.name);
+                    masm_append_line(ctx, mov_instr);
                 }
             }
             return true;
+        }
+            
+        case NODE_BINARY_OP: {
+            /* Generate binary operation */
+            if (!masm_generate_ast_node(ctx, node->data.binary_op.left)) {
+                printf("ERROR: Failed to generate MASM for left operand\n");
+                return false;
+            }
+            
+            /* Save left operand */
+            masm_append_line(ctx, "    push rax        ; Save left operand");
+            
+            /* Generate right operand */
+            if (!masm_generate_ast_node(ctx, node->data.binary_op.right)) {
+                printf("ERROR: Failed to generate MASM for right operand\n");
+                return false;
+            }
+            
+            /* Restore left operand and perform operation */
+            masm_append_line(ctx, "    pop rbx         ; Restore left operand");
+            
+            switch (node->data.binary_op.op) {
+                case BINOP_ADD:
+                    masm_append_line(ctx, "    add rax, rbx    ; Addition");
+                    break;
+                case BINOP_SUB:
+                    masm_append_line(ctx, "    sub rbx, rax    ; Subtraction");
+                    masm_append_line(ctx, "    mov rax, rbx    ; Move result to rax");
+                    break;
+                case BINOP_MUL:
+                    masm_append_line(ctx, "    imul rax, rbx   ; Multiplication");
+                    break;
+                case BINOP_DIV:
+                    masm_append_line(ctx, "    xchg rax, rbx   ; Swap operands");
+                    masm_append_line(ctx, "    cqo             ; Sign extend rax to rdx:rax");
+                    masm_append_line(ctx, "    idiv rbx        ; Division");
+                    break;
+                default:
+                    printf("WARNING: Unhandled binary operator %d\n", node->data.binary_op.op);
+                    masm_append_line(ctx, "    mov rax, rbx    ; Default: use left operand");
+                    break;
+            }
+            return true;
+        }
+            
+        case NODE_IF_STMT: {
+            /* Generate if statement */
+            printf("DEBUG: Generating MASM if statement\n");
+            
+            /* Generate unique labels */
+            static I64 if_label_counter = 0;
+            if_label_counter++;
+            char else_label[64], end_label[64];
+            snprintf(else_label, sizeof(else_label), "if_else_%d", (int)if_label_counter);
+            snprintf(end_label, sizeof(end_label), "if_end_%d", (int)if_label_counter);
+            
+            /* Generate condition evaluation */
+            masm_append_line(ctx, "; If condition evaluation");
+            if (!masm_generate_ast_node(ctx, node->data.if_stmt.condition)) {
+                printf("ERROR: Failed to generate MASM for if condition\n");
+                return false;
+            }
+            
+            /* Test condition and jump to else if false */
+            masm_append_line(ctx, "    test rax, rax   ; Test condition");
+            if (node->data.if_stmt.else_stmt) {
+                char jz_instr[64];
+                snprintf(jz_instr, sizeof(jz_instr), "    jz %s          ; Jump to else if false", else_label);
+                masm_append_line(ctx, jz_instr);
+            } else {
+                char jz_instr[64];
+                snprintf(jz_instr, sizeof(jz_instr), "    jz %s          ; Jump to end if false", end_label);
+                masm_append_line(ctx, jz_instr);
+            }
+            
+            /* Generate then statement */
+            masm_append_line(ctx, "; Then statement");
+            if (!masm_generate_ast_node(ctx, node->data.if_stmt.then_stmt)) {
+                printf("ERROR: Failed to generate MASM for then statement\n");
+                return false;
+            }
+            
+            /* Jump to end if we have else clause */
+            if (node->data.if_stmt.else_stmt) {
+                char jmp_instr[64];
+                snprintf(jmp_instr, sizeof(jmp_instr), "    jmp %s         ; Jump to end", end_label);
+                masm_append_line(ctx, jmp_instr);
+                char else_label_line[64];
+                snprintf(else_label_line, sizeof(else_label_line), "%s:", else_label);
+                masm_append_line(ctx, else_label_line);
+                
+                /* Generate else statement */
+                masm_append_line(ctx, "; Else statement");
+                if (!masm_generate_ast_node(ctx, node->data.if_stmt.else_stmt)) {
+                    printf("ERROR: Failed to generate MASM for else statement\n");
+                    return false;
+                }
+            }
+            
+            char end_label_line[64];
+            snprintf(end_label_line, sizeof(end_label_line), "%s:", end_label);
+            masm_append_line(ctx, end_label_line);
+            return true;
+        }
+            
+        case NODE_WHILE_STMT: {
+            /* Generate while statement */
+            printf("DEBUG: Generating MASM while statement\n");
+            
+            /* Generate unique labels */
+            static I64 while_label_counter = 0;
+            while_label_counter++;
+            char loop_label[64], end_label[64];
+            snprintf(loop_label, sizeof(loop_label), "while_loop_%d", (int)while_label_counter);
+            snprintf(end_label, sizeof(end_label), "while_end_%d", (int)while_label_counter);
+            
+            /* Generate loop start label */
+            char loop_label_line[64];
+            snprintf(loop_label_line, sizeof(loop_label_line), "%s:", loop_label);
+            masm_append_line(ctx, loop_label_line);
+            
+            /* Generate condition evaluation */
+            masm_append_line(ctx, "; While condition evaluation");
+            if (!masm_generate_ast_node(ctx, node->data.while_stmt.condition)) {
+                printf("ERROR: Failed to generate MASM for while condition\n");
+                return false;
+            }
+            
+            /* Test condition and jump to end if false */
+            masm_append_line(ctx, "    test rax, rax   ; Test condition");
+            char jz_instr[64];
+            snprintf(jz_instr, sizeof(jz_instr), "    jz %s          ; Jump to end if false", end_label);
+            masm_append_line(ctx, jz_instr);
+            
+            /* Generate loop body */
+            masm_append_line(ctx, "; While loop body");
+            if (!masm_generate_ast_node(ctx, node->data.while_stmt.body_stmt)) {
+                printf("ERROR: Failed to generate MASM for while body\n");
+                return false;
+            }
+            
+            /* Jump back to loop start */
+            char jmp_instr[64];
+            snprintf(jmp_instr, sizeof(jmp_instr), "    jmp %s         ; Jump back to loop start", loop_label);
+            masm_append_line(ctx, jmp_instr);
+            
+            /* Generate end label */
+            char end_label_line[64];
+            snprintf(end_label_line, sizeof(end_label_line), "%s:", end_label);
+            masm_append_line(ctx, end_label_line);
+            return true;
+        }
             
         default:
             printf("WARNING: Unhandled AST node type %d in MASM generation\n", node->type);
@@ -413,16 +692,10 @@ Bool masm_generate_assembly_from_ast(MASMContext *ctx, ASTNode *ast, const char 
     /* Generate MASM assembly from AST */
     if (!masm_generate_header(ctx)) return false;
     
-    /* Generate functions from AST */
-    ASTNode *child = ast->children;
-    while (child) {
-        if (child->type == NODE_FUNCTION) {
-            if (!masm_generate_function_declaration(ctx, child)) {
-                printf("ERROR: Failed to generate MASM for function\n");
-                return false;
-            }
-        }
-        child = child->next;
+    /* Generate user_main function with all global statements */
+    if (!masm_generate_user_main_function(ctx, ast)) {
+        printf("ERROR: Failed to generate user_main function\n");
+        return false;
     }
     
     if (!masm_generate_footer(ctx)) return false;

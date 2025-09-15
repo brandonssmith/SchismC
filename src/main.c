@@ -22,6 +22,9 @@ Bool test_masm_output_generation(void);
 Bool create_simple_hello_executable(const char *filename);
 
 int main(int argc, char *argv[]) {
+    fflush(stdout);
+    printf("DEBUG: main - function entry\n");
+    fflush(stdout);
     printf("SchismC Compiler - Assembly-Based HolyC Port\n");
     printf("============================================\n");
     
@@ -32,6 +35,8 @@ int main(int argc, char *argv[]) {
     
     char *input_file = argv[1];
     char *output_file = NULL;
+    
+    printf("DEBUG: main - input file: %s\n", input_file);
     
     /* Parse command line arguments */
     for (int i = 2; i < argc; i++) {
@@ -47,7 +52,9 @@ int main(int argc, char *argv[]) {
     }
     
     /* Test core structures */
+    printf("DEBUG: main - about to create CCmpCtrl\n");
     CCmpCtrl *cc = ccmpctrl_new();
+    printf("DEBUG: main - CCmpCtrl created: %p\n", cc);
     if (cc) {
         printf("✓ CCmpCtrl created successfully\n");
         printf("  - Assembly mode: %s\n", cc->use_64bit_mode ? "x86-64" : "x86-32");
@@ -60,26 +67,37 @@ int main(int argc, char *argv[]) {
     }
     
     /* Test lexer */
+    printf("DEBUG: main - about to open input file: %s\n", argv[1]);
     FILE *input = fopen(argv[1], "r");
+    printf("DEBUG: main - file opened: %p\n", input);
     if (!input) {
         printf("✗ Failed to open input file: %s\n", argv[1]);
         return 1;
     }
     
+    printf("DEBUG: main - about to create lexer\n");
+    printf("DEBUG: main - input file pointer: %p\n", input);
     LexerState *lexer = lexer_new(input);
+    printf("DEBUG: main - lexer_new returned: %p\n", lexer);
     if (lexer) {
         printf("✓ Lexer created successfully\n");
         
         /* Test tokenization */
-        TokenType token = lex_next_token(lexer);
-        printf("✓ First token: %d\n", token);
+        printf("DEBUG: main - about to get first token\n");
+        TokenType first_token = lex_next_token(lexer);
+        printf("✓ First token: %d\n", first_token);
+        
+        /* Lexer is ready for parser */
+        printf("DEBUG: main - lexer ready for parser\n");
         
         /* Create parser */
+        printf("DEBUG: main - about to create parser\n");
         ParserState *parser = parser_new(lexer, cc);
         if (parser) {
             printf("✓ Parser created successfully\n");
             
             /* Parse the program */
+            printf("DEBUG: main - about to parse program\n");
             ASTNode *ast = parse_program(parser);
             if (ast) {
                 printf("✓ AST generated successfully\n");
@@ -212,6 +230,35 @@ int main(int argc, char *argv[]) {
                     ic_gen_context_free(ic_ctx);
                 } else {
                     printf("✗ Failed to create intermediate code context\n");
+                }
+                
+                /* AOT Compilation to Executable */
+                printf("\n=== AOT Compilation to Executable ===\n");
+                AssemblyContext *aot_asm_ctx = assembly_context_new(cc, NULL, parser);
+                if (aot_asm_ctx) {
+                    printf("✓ AOT Assembly context created successfully\n");
+                    
+                    /* Create AOT context */
+                    AOTContext *aot_ctx = aot_context_new(cc, aot_asm_ctx);
+                    if (aot_ctx) {
+                        printf("✓ AOT context created successfully\n");
+                        
+                        /* Compile to executable */
+                        if (aot_compile_to_executable(aot_ctx, "test_pe_output.exe")) {
+                            printf("✓ AOT compilation to executable successful\n");
+                            printf("  - Output file: test_pe_output.exe\n");
+                        } else {
+                            printf("✗ AOT compilation to executable failed\n");
+                        }
+                        
+                        aot_context_free(aot_ctx);
+                    } else {
+                        printf("✗ Failed to create AOT context\n");
+                    }
+                    
+                    assembly_context_free(aot_asm_ctx);
+                } else {
+                    printf("✗ Failed to create AOT assembly context\n");
                 }
                 
                 /* Free AST */

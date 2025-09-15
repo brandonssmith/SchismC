@@ -20,6 +20,7 @@ SOURCES = $(wildcard $(SRCDIR)/*.c) \
           $(wildcard $(SRCDIR)/runtime/*.c) \
           $(SRCDIR)/frontend/lexer/lexer.c \
           $(SRCDIR)/frontend/parser/parser.c \
+          $(SRCDIR)/frontend/type_checker/type_checker.c \
           $(wildcard $(SRCDIR)/middleend/intermediate/*.c) \
           $(wildcard $(SRCDIR)/backend/assembly/*.c) \
           $(wildcard $(SRCDIR)/backend/aot/*.c)

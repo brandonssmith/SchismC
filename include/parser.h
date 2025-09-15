@@ -35,6 +35,7 @@ typedef enum {
     NODE_FLOAT,
     NODE_STRING,
     NODE_CHAR,
+    NODE_BOOLEAN,
     
     /* Assembly-specific nodes */
     NODE_ASM_BLOCK,
@@ -260,6 +261,7 @@ typedef struct ASTNode {
             I64 i64_value;    /* Integer value */
             F64 f64_value;    /* Float value */
             U8 *str_value;    /* String value */
+            Bool bool_value;  /* Boolean value */
             U8 char_value;    /* Character value */
             U8 *type_name;    /* Type name */
             I64 size;         /* Size in bytes */
@@ -339,6 +341,11 @@ typedef struct ASTNode {
             struct ASTNode *condition;  /* Loop condition */
             struct ASTNode *body_stmt;  /* Loop body statement */
         } while_stmt;
+        
+        /* Boolean literal */
+        struct {
+            Bool value;        /* Boolean value */
+        } boolean;
     } data;
     
     /* AST navigation */
@@ -543,6 +550,7 @@ I64 parser_calculate_function_address(ParserState *parser, U8 *function_name);
 I64 parser_calculate_variable_address(ParserState *parser, U8 *variable_name);
 I64 parser_calculate_relative_address(ParserState *parser, I64 from_address, I64 to_address);
 void parser_initialize_address_space(ParserState *parser);
+void parser_initialize_builtin_functions(ParserState *parser);
 
 /* Assembly integration */
 Bool parser_is_assembly_token(TokenType token);
