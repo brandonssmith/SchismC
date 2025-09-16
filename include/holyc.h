@@ -44,6 +44,10 @@ extern I64 ToI64(F64 value);
 extern F64 ToF64(I64 value);
 extern Bool ToBool(I64 value);
 
+/* File I/O Functions */
+extern Bool FileWrite(const char* filename, const void* buf, I64 size, I64 flags);
+extern void* FileRead(const char* path, I64* size);
+
 /* Compiler Control Structure - Based on TempleOS CCmpCtrl */
 typedef struct {
     I64 pass;                    /* Compilation pass number */

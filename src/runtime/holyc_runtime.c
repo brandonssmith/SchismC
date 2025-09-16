@@ -220,3 +220,93 @@ F64 ToF64(I64 value) {
 Bool ToBool(I64 value) {
     return value != 0;
 }
+
+/*
+ * File I/O Functions - HolyC style
+ */
+
+/*
+ * FileWrite - Write buffer to file (HolyC style)
+ * Parameters: filename, buffer, size, flags
+ * Returns: TRUE on success, FALSE on failure
+ */
+Bool FileWrite(const char* filename, const void* buf, I64 size, I64 flags) {
+    if (!filename || !buf || size < 0) {
+        return false;
+    }
+    
+    FILE* file = fopen(filename, "wb");
+    if (!file) {
+        return false;
+    }
+    
+    /* Write data in chunks to handle large files */
+    const I64 chunk_size = 0x7FFFFFFF;  /* 2GB chunks */
+    const char* buffer_ptr = (const char*)buf;
+    I64 remaining_bytes = size;
+    I64 total_written = 0;
+    
+    while (remaining_bytes > 0) {
+        I64 bytes_to_write = (remaining_bytes > chunk_size) ? chunk_size : remaining_bytes;
+        I64 written = fwrite(buffer_ptr, 1, (size_t)bytes_to_write, file);
+        
+        if (written != bytes_to_write) {
+            fclose(file);
+            return false;
+        }
+        
+        total_written += written;
+        buffer_ptr += written;
+        remaining_bytes -= written;
+    }
+    
+    fclose(file);
+    return total_written == size;
+}
+
+/*
+ * FileRead - Read entire file (HolyC style)
+ * Parameters: path, optional size pointer
+ * Returns: allocated buffer with file contents, NULL on failure
+ */
+void* FileRead(const char* path, I64* size) {
+    if (!path) return NULL;
+    
+    FILE* file = fopen(path, "rb");
+    if (!file) return NULL;
+    
+    /* Get file size */
+    fseek(file, 0, SEEK_END);
+    I64 file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    if (file_size < 0) {
+        fclose(file);
+        return NULL;
+    }
+    
+    /* Allocate buffer */
+    void* buffer = MAlloc(file_size + 1);
+    if (!buffer) {
+        fclose(file);
+        return NULL;
+    }
+    
+    /* Read file */
+    I64 bytes_read = fread(buffer, 1, (size_t)file_size, file);
+    fclose(file);
+    
+    if (bytes_read != file_size) {
+        Free(buffer);
+        return NULL;
+    }
+    
+    /* Null terminate for safety */
+    ((char*)buffer)[file_size] = '\0';
+    
+    if (size) {
+        *size = file_size;
+    }
+    
+    return buffer;
+}

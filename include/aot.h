@@ -158,6 +158,7 @@ Bool aot_generate_relocations(AOTContext *ctx);
 
 /* Binary Output */
 Bool aot_write_binary(AOTContext *ctx, const char *filename);
+Bool aot_write_binary_windows(AOTContext *ctx, const char *filename);
 Bool aot_append_binary(AOTContext *ctx, const U8 *data, I64 size);
 Bool aot_align_binary(AOTContext *ctx, I64 alignment);
 

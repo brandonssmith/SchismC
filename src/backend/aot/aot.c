@@ -7,6 +7,7 @@
 #include "aot.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 /*
  * AOT Context Management
@@ -336,14 +337,10 @@ Bool aot_generate_pe_header(AOTContext *ctx) {
     };
     
     printf("DEBUG: Appending data directories (%zu bytes)\n", sizeof(data_directories));
-    /* Temporarily disable data directories to test AOT compilation */
-    /* Temporarily disable data directories to test AOT compilation */
-    /*
     if (!aot_append_binary(ctx, (U8*)&data_directories, sizeof(data_directories))) {
         printf("ERROR: Failed to append data directories\n");
         return false;
     }
-    */
     
     return true;
 }
@@ -529,68 +526,49 @@ Bool aot_generate_relocations(AOTContext *ctx) {
 Bool aot_write_binary(AOTContext *ctx, const char *filename) {
     if (!ctx || !filename) return false;
     
-    fputs("DEBUG: Opening file for writing\n", stdout);
-    fflush(stdout);
-    FILE *file = fopen(filename, "wb");
-    if (!file) {
-        fputs("ERROR: Failed to open file for writing\n", stdout);
-        fflush(stdout);
-        return false;
-    }
-    
-    fputs("DEBUG: Writing binary data to file\n", stdout);
+    printf("DEBUG: Creating file using Windows API: %s\n", filename);
     fflush(stdout);
     
     /* Validate binary buffer and size */
     if (!ctx->binary_buffer) {
         fputs("ERROR: Binary buffer is NULL\n", stdout);
         fflush(stdout);
-        fclose(file);
         return false;
     }
     
     if (ctx->binary_size <= 0) {
         fputs("ERROR: Invalid binary size\n", stdout);
         fflush(stdout);
-        fclose(file);
         return false;
     }
     
-    if (ctx->binary_size > 1000000) {  /* Sanity check - 1MB max */
-        fputs("ERROR: Binary size too large\n", stdout);
+    if (ctx->binary_size > 0xFFFFFFFF) {  /* Sanity check - 4GB max (DWORD limit) */
+        printf("ERROR: Binary size too large: %lld bytes (max: 4GB)\n", ctx->binary_size);
         fflush(stdout);
-        fclose(file);
         return false;
     }
     
-    fputs("DEBUG: Binary buffer validation passed\n", stdout);
+    printf("DEBUG: Binary buffer validation passed - size: %lld, buffer: %p\n", ctx->binary_size, (void*)ctx->binary_buffer);
     fflush(stdout);
     
-    /* Write the entire binary buffer (includes DOS stub, PE headers, and data) */
-    /* Write in smaller chunks to avoid hangs */
-    I64 remaining = ctx->binary_size;
-    I64 offset = 0;
-    I64 chunk_count = 0;
-    while (remaining > 0) {
-        I64 chunk_size = (remaining > 1024) ? 1024 : remaining;
-        fputs("DEBUG: Writing chunk\n", stdout);
+    /* Use simple file writing approach */
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        printf("ERROR: Failed to create file '%s'\n", filename);
         fflush(stdout);
-        fwrite(ctx->binary_buffer + offset, 1, chunk_size, file);
-        offset += chunk_size;
-        remaining -= chunk_size;
-        chunk_count++;
-        if (chunk_count > 1000) {  /* Safety check */
-            fputs("ERROR: Too many chunks, breaking\n", stdout);
-            fflush(stdout);
-            break;
-        }
+        return false;
     }
     
-    fputs("DEBUG: Closing file\n", stdout);
-    fflush(stdout);
+    size_t bytes_written = fwrite(ctx->binary_buffer, 1, ctx->binary_size, file);
     fclose(file);
     
-    fputs("DEBUG: File written successfully\n", stdout);
+    if (bytes_written != ctx->binary_size) {
+        printf("ERROR: Wrote %zu bytes, expected %lld\n", bytes_written, ctx->binary_size);
+        fflush(stdout);
+        return false;
+    }
+    
+    printf("DEBUG: Successfully wrote %zu bytes to file\n", bytes_written);
     fflush(stdout);
     return true;
 }
@@ -696,7 +674,7 @@ CAOT* aot_compile_join(AOTContext *ctx, I64 cmp_flags, const char *map_name) {
         fflush(stdout);
         return NULL;
     }
-    fputs("DEBUG: Generated assembly code\n", stdout);
+    printf("DEBUG: Generated assembly code - pointer: %p, size: %lld\n", (void*)assembly, assembly_size);
     fflush(stdout);
     
     /* Append assembly to binary */
@@ -755,9 +733,18 @@ CAOT* aot_compile_join(AOTContext *ctx, I64 cmp_flags, const char *map_name) {
     ctx->pe_optional.size_of_code = assembly_size;
     ctx->pe_optional.size_of_image = ctx->binary_size + 0x1000;  /* Add header space */
     
+    fputs("DEBUG: PE headers updated successfully\n", stdout);
+    fflush(stdout);
+    
+    fputs("DEBUG: Assembly buffer is part of context, not freeing it\n", stdout);
+    fflush(stdout);
+    
     fputs("DEBUG: AOT compile join completed successfully\n", stdout);
     fflush(stdout);
-    free(assembly);
+    
+    fputs("DEBUG: Returning from aot_compile_join\n", stdout);
+    fflush(stdout);
+    
     return ctx->aot;
 }
 
@@ -772,7 +759,11 @@ Bool aot_compile_to_executable(AOTContext *ctx, const char *output_filename) {
     fflush(stdout);
     
     /* Compile to AOT */
+    fputs("DEBUG: About to call aot_compile_join\n", stdout);
+    fflush(stdout);
     CAOT *aot = aot_compile_join(ctx, 0, NULL);
+    fputs("DEBUG: aot_compile_join returned\n", stdout);
+    fflush(stdout);
     if (!aot) {
         fputs("ERROR: AOT compilation failed\n", stdout);
         fflush(stdout);
@@ -783,6 +774,8 @@ Bool aot_compile_to_executable(AOTContext *ctx, const char *output_filename) {
     fflush(stdout);
     
     /* Write binary to file */
+    fputs("DEBUG: About to call aot_write_binary\n", stdout);
+    fflush(stdout);
     Bool result = aot_write_binary(ctx, output_filename);
     if (result) {
         fputs("DEBUG: Binary written successfully\n", stdout);
@@ -1122,6 +1115,9 @@ Bool aot_generate_import_descriptor_table(AOTContext *ctx) {
     }
     
     fputs("DEBUG: Complete import descriptor table generated successfully\n", stdout);
+    fflush(stdout);
+    
+    fputs("DEBUG: Returning from aot_generate_import_descriptor_table\n", stdout);
     fflush(stdout);
     
     return true;
