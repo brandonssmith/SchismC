@@ -77,23 +77,23 @@ typedef bool Bool;
 
 /* Register types for x86-64 */
 typedef enum {
-    REG_NONE = 0,
-    REG_RAX, REG_RCX, REG_RDX, REG_RBX,  /* General purpose 64-bit */
-    REG_RSP, REG_RBP, REG_RSI, REG_RDI,  /* General purpose 64-bit */
-    REG_R8, REG_R9, REG_R10, REG_R11,    /* Extended 64-bit */
-    REG_R12, REG_R13, REG_R14, REG_R15,  /* Extended 64-bit */
-    REG_EAX, REG_ECX, REG_EDX, REG_EBX,  /* 32-bit variants */
-    REG_ESP, REG_EBP, REG_ESI, REG_EDI,  /* 32-bit variants */
-    REG_AX, REG_CX, REG_DX, REG_BX,      /* 16-bit variants */
-    REG_SP, REG_BP, REG_SI, REG_DI,      /* 16-bit variants */
-    REG_AL, REG_CL, REG_DL, REG_BL,      /* 8-bit variants */
-    REG_AH, REG_CH, REG_DH, REG_BH,      /* 8-bit high variants */
-    REG_R8B, REG_R9B, REG_R10B, REG_R11B, /* 8-bit extended */
-    REG_R12B, REG_R13B, REG_R14B, REG_R15B, /* 8-bit extended */
-    REG_XMM0, REG_XMM1, REG_XMM2, REG_XMM3, /* SSE registers */
-    REG_XMM4, REG_XMM5, REG_XMM6, REG_XMM7,
-    REG_XMM8, REG_XMM9, REG_XMM10, REG_XMM11,
-    REG_XMM12, REG_XMM13, REG_XMM14, REG_XMM15
+    X86_REG_NONE = 0,
+    X86_REG_RAX, X86_REG_RCX, X86_REG_RDX, X86_REG_RBX,  /* General purpose 64-bit */
+    X86_REG_RSP, X86_REG_RBP, X86_REG_RSI, X86_REG_RDI,  /* General purpose 64-bit */
+    X86_REG_R8, X86_REG_R9, X86_REG_R10, X86_REG_R11,    /* Extended 64-bit */
+    X86_REG_R12, X86_REG_R13, X86_REG_R14, X86_REG_R15,  /* Extended 64-bit */
+    X86_REG_EAX, X86_REG_ECX, X86_REG_EDX, X86_REG_EBX,  /* 32-bit variants */
+    X86_REG_ESP, X86_REG_EBP, X86_REG_ESI, X86_REG_EDI,  /* 32-bit variants */
+    X86_REG_AX, X86_REG_CX, X86_REG_DX, X86_REG_BX,      /* 16-bit variants */
+    X86_REG_SP, X86_REG_BP, X86_REG_SI, X86_REG_DI,      /* 16-bit variants */
+    X86_REG_AL, X86_REG_CL, X86_REG_DL, X86_REG_BL,      /* 8-bit variants */
+    X86_REG_AH, X86_REG_CH, X86_REG_DH, X86_REG_BH,      /* 8-bit high variants */
+    X86_REG_R8B, X86_REG_R9B, X86_REG_R10B, X86_REG_R11B, /* 8-bit extended */
+    X86_REG_R12B, X86_REG_R13B, X86_REG_R14B, X86_REG_R15B, /* 8-bit extended */
+    X86_REG_XMM0, X86_REG_XMM1, X86_REG_XMM2, X86_REG_XMM3, /* SSE registers */
+    X86_REG_XMM4, X86_REG_XMM5, X86_REG_XMM6, X86_REG_XMM7,
+    X86_REG_XMM8, X86_REG_XMM9, X86_REG_XMM10, X86_REG_XMM11,
+    X86_REG_XMM12, X86_REG_XMM13, X86_REG_XMM14, X86_REG_XMM15
 } X86Register;
 
 /* Memory addressing modes */

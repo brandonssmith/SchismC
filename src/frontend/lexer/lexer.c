@@ -10,15 +10,15 @@
 #include <stdlib.h>
 
 /* Forward declarations */
-static TokenType lex_parse_string(LexerState *lexer);
-static TokenType lex_parse_char(LexerState *lexer);
-static TokenType lex_parse_number(LexerState *lexer);
-static TokenType lex_parse_identifier(LexerState *lexer);
+static SchismTokenType lex_parse_string(LexerState *lexer);
+static SchismTokenType lex_parse_char(LexerState *lexer);
+static SchismTokenType lex_parse_number(LexerState *lexer);
+static SchismTokenType lex_parse_identifier(LexerState *lexer);
 
 /* Keyword lookup table */
 typedef struct {
     const char *name;
-    TokenType token;
+    SchismTokenType token;
 } Keyword;
 
 static Keyword keywords[] = {
@@ -35,6 +35,8 @@ static Keyword keywords[] = {
     {"continue", TK_CONTINUE},
     {"return", TK_RETURN},
     {"goto", TK_GOTO},
+    {"start", TK_START},
+    {"end", TK_END},
     
     /* Preprocessor */
     {"ifdef", TK_IFDEF},
@@ -65,6 +67,7 @@ static Keyword keywords[] = {
     {"catch", TK_CATCH},
     {"throw", TK_THROW},
     {"no_warn", TK_NO_WARN},
+    {"auto", TK_AUTO},
     
     /* Boolean literals */
     {"true", TK_TRUE},
@@ -129,17 +132,17 @@ typedef struct {
 } RegMapping;
 
 static RegMapping reg_map[] = {
-    {"RAX", REG_RAX}, {"RCX", REG_RCX}, {"RDX", REG_RDX}, {"RBX", REG_RBX},
-    {"RSP", REG_RSP}, {"RBP", REG_RBP}, {"RSI", REG_RSI}, {"RDI", REG_RDI},
-    {"R8", REG_R8}, {"R9", REG_R9}, {"R10", REG_R10}, {"R11", REG_R11},
-    {"R12", REG_R12}, {"R13", REG_R13}, {"R14", REG_R14}, {"R15", REG_R15},
-    {"EAX", REG_EAX}, {"ECX", REG_ECX}, {"EDX", REG_EDX}, {"EBX", REG_EBX},
-    {"ESP", REG_ESP}, {"EBP", REG_EBP}, {"ESI", REG_ESI}, {"EDI", REG_EDI},
-    {"AX", REG_AX}, {"CX", REG_CX}, {"DX", REG_DX}, {"BX", REG_BX},
-    {"SP", REG_SP}, {"BP", REG_BP}, {"SI", REG_SI}, {"DI", REG_DI},
-    {"AL", REG_AL}, {"CL", REG_CL}, {"DL", REG_DL}, {"BL", REG_BL},
-    {"AH", REG_AH}, {"CH", REG_CH}, {"DH", REG_DH}, {"BH", REG_BH},
-    {NULL, REG_NONE}
+    {"RAX", X86_REG_RAX}, {"RCX", X86_REG_RCX}, {"RDX", X86_REG_RDX}, {"RBX", X86_REG_RBX},
+    {"RSP", X86_REG_RSP}, {"RBP", X86_REG_RBP}, {"RSI", X86_REG_RSI}, {"RDI", X86_REG_RDI},
+    {"R8", X86_REG_R8}, {"R9", X86_REG_R9}, {"R10", X86_REG_R10}, {"R11", X86_REG_R11},
+    {"R12", X86_REG_R12}, {"R13", X86_REG_R13}, {"R14", X86_REG_R14}, {"R15", X86_REG_R15},
+    {"EAX", X86_REG_EAX}, {"ECX", X86_REG_ECX}, {"EDX", X86_REG_EDX}, {"EBX", X86_REG_EBX},
+    {"ESP", X86_REG_ESP}, {"EBP", X86_REG_EBP}, {"ESI", X86_REG_ESI}, {"EDI", X86_REG_EDI},
+    {"AX", X86_REG_AX}, {"CX", X86_REG_CX}, {"DX", X86_REG_DX}, {"BX", X86_REG_BX},
+    {"SP", X86_REG_SP}, {"BP", X86_REG_BP}, {"SI", X86_REG_SI}, {"DI", X86_REG_DI},
+    {"AL", X86_REG_AL}, {"CL", X86_REG_CL}, {"DL", X86_REG_DL}, {"BL", X86_REG_BL},
+    {"AH", X86_REG_AH}, {"CH", X86_REG_CH}, {"DH", X86_REG_DH}, {"BH", X86_REG_BH},
+    {NULL, X86_REG_NONE}
 };
 
 /*
@@ -166,7 +169,7 @@ LexerState* lexer_new(FILE *input) {
     /* Initialize assembly state */
     lexer->in_asm_block = false;
     lexer->in_asm_instruction = false;
-    lexer->current_reg = REG_NONE;
+    lexer->current_reg = X86_REG_NONE;
     
     /* Load file content into buffer */
     if (input) {
@@ -311,14 +314,14 @@ Bool lex_is_assembly_register(U8 *str) {
 }
 
 X86Register lex_parse_register(U8 *str) {
-    if (!str) return REG_NONE;
+    if (!str) return X86_REG_NONE;
     
     for (I64 i = 0; reg_map[i].name; i++) {
         if (strcmp((const char*)str, reg_map[i].name) == 0) {
             return reg_map[i].reg;
         }
     }
-    return REG_NONE;
+    return X86_REG_NONE;
 }
 
 I64 lex_parse_operand_size(U8 *str) {
@@ -362,16 +365,16 @@ Bool lex_is_holyc_keyword(U8 *str) {
 Bool lex_is_builtin_type(U8 *str) {
     if (!str) return false;
     
-    TokenType type = lex_get_builtin_type_token(str);
+    SchismTokenType type = lex_get_builtin_type_token(str);
     return (type != TK_IDENT);
 }
 
-TokenType lex_get_builtin_type_token(U8 *str) {
+SchismTokenType lex_get_builtin_type_token(U8 *str) {
     if (!str) return TK_IDENT;
     
     for (I64 i = 0; keywords[i].name; i++) {
         if (strcmp((const char*)str, keywords[i].name) == 0) {
-            TokenType token = keywords[i].token;
+            SchismTokenType token = keywords[i].token;
             if (token >= TK_TYPE_I0 && token <= TK_TYPE_STRING) {
                 return token;
             }
@@ -384,7 +387,7 @@ TokenType lex_get_builtin_type_token(U8 *str) {
  * Main tokenization functions
  */
 
-TokenType lex_next_token(LexerState *lexer) {
+SchismTokenType lex_next_token(LexerState *lexer) {
     printf("DEBUG: lex_next_token - starting\n");
     if (!lexer) {
         printf("DEBUG: lex_next_token - lexer is NULL\n");
@@ -416,6 +419,50 @@ TokenType lex_next_token(LexerState *lexer) {
     }
     
     U8 c = lexer->input_buffer[lexer->buffer_pos];
+    
+    /* Handle comments */
+    if (c == '/' && lexer->buffer_pos + 1 < lexer->buffer_size) {
+        U8 next_c = lexer->input_buffer[lexer->buffer_pos + 1];
+        if (next_c == '*') {
+            /* C-style comment */
+            lexer->buffer_pos += 2; /* Skip comment start */
+            lexer->buffer_column += 2;
+            
+            /* Skip until comment end */
+            while (lexer->buffer_pos + 1 < lexer->buffer_size) {
+                if (lexer->input_buffer[lexer->buffer_pos] == '*' &&
+                    lexer->input_buffer[lexer->buffer_pos + 1] == '/') {
+                    lexer->buffer_pos += 2; /* Skip comment end */
+                    lexer->buffer_column += 2;
+                    break;
+                }
+                if (lex_is_newline(lexer->input_buffer[lexer->buffer_pos])) {
+                    lexer->buffer_line++;
+                    lexer->buffer_column = 1;
+                } else {
+                    lexer->buffer_column++;
+                }
+                lexer->buffer_pos++;
+            }
+            
+            /* Recursively call to get next token */
+            return lex_next_token(lexer);
+        } else if (next_c == '/') {
+            /* C++ style comment */
+            lexer->buffer_pos += 2; /* Skip // */
+            lexer->buffer_column += 2;
+            
+            /* Skip until end of line */
+            while (lexer->buffer_pos < lexer->buffer_size &&
+                   !lex_is_newline(lexer->input_buffer[lexer->buffer_pos])) {
+                lexer->buffer_pos++;
+                lexer->buffer_column++;
+            }
+            
+            /* Recursively call to get next token */
+            return lex_next_token(lexer);
+        }
+    }
     
     /* Handle single character tokens */
     switch (c) {
@@ -659,8 +706,17 @@ TokenType lex_next_token(LexerState *lexer) {
             return c;
             
         case '.':
-            if (lexer->buffer_pos + 1 < lexer->buffer_size &&
-                lexer->input_buffer[lexer->buffer_pos + 1] == '.') {
+            if (lexer->buffer_pos + 2 < lexer->buffer_size &&
+                lexer->input_buffer[lexer->buffer_pos + 1] == '.' &&
+                lexer->input_buffer[lexer->buffer_pos + 2] == '.') {
+                /* Three dots (...) - ellipsis for range expressions */
+                lexer->current_token = TK_ELLIPSIS;
+                lexer->buffer_pos += 3;
+                lexer->buffer_column += 3;
+                return TK_ELLIPSIS;
+            } else if (lexer->buffer_pos + 1 < lexer->buffer_size &&
+                       lexer->input_buffer[lexer->buffer_pos + 1] == '.') {
+                /* Two dots (..) - range operator */
                 lexer->current_token = TK_DOT_DOT;
                 lexer->buffer_pos += 2;
                 lexer->buffer_column += 2;
@@ -697,7 +753,7 @@ TokenType lex_next_token(LexerState *lexer) {
 /* Helper functions for parsing specific token types */
 
 
-static TokenType lex_parse_string(LexerState *lexer) {
+static SchismTokenType lex_parse_string(LexerState *lexer) {
     printf("DEBUG: lex_parse_string - starting\n");
     I64 start_pos = lexer->buffer_pos + 1;  /* Skip opening quote */
     I64 start_col = lexer->buffer_column + 1;
@@ -738,19 +794,36 @@ static TokenType lex_parse_string(LexerState *lexer) {
     return TK_STR;
 }
 
-static TokenType lex_parse_char(LexerState *lexer) {
+static SchismTokenType lex_parse_char(LexerState *lexer) {
     I64 start_pos = lexer->buffer_pos + 1;  /* Skip opening quote */
+    I64 char_count = 0;
     
     lexer->buffer_pos++;
     lexer->buffer_column++;
     
-    if (lexer->input_buffer[lexer->buffer_pos] == '\\') {
-        lexer->buffer_pos++;  /* Skip escape character */
+    /* Parse characters until closing quote */
+    while (lexer->buffer_pos < lexer->buffer_size &&
+           lexer->input_buffer[lexer->buffer_pos] != '\'') {
+        
+        if (lexer->input_buffer[lexer->buffer_pos] == '\\') {
+            lexer->buffer_pos++;  /* Skip escape character */
+            lexer->buffer_column++;
+            if (lexer->buffer_pos >= lexer->buffer_size) {
+                lex_error(lexer, "Unterminated escape sequence");
+                return TK_EOF;
+            }
+        }
+        
+        lexer->buffer_pos++;
         lexer->buffer_column++;
+        char_count++;
+        
+        /* Limit multi-character constants to reasonable size */
+        if (char_count > 8) {
+            lex_error(lexer, "Character constant too long");
+            return TK_EOF;
+        }
     }
-    
-    lexer->buffer_pos++;
-    lexer->buffer_column++;
     
     if (lexer->buffer_pos >= lexer->buffer_size ||
         lexer->input_buffer[lexer->buffer_pos] != '\'') {
@@ -758,8 +831,9 @@ static TokenType lex_parse_char(LexerState *lexer) {
         return TK_EOF;
     }
     
-    lexer->token_value = lex_create_string(&lexer->input_buffer[start_pos], 1);
-    lexer->token_length = 1;
+    /* Create token value with all characters */
+    lexer->token_value = lex_create_string(&lexer->input_buffer[start_pos], char_count);
+    lexer->token_length = char_count;
     
     lexer->buffer_pos++;  /* Skip closing quote */
     lexer->buffer_column++;
@@ -768,7 +842,7 @@ static TokenType lex_parse_char(LexerState *lexer) {
     return TK_CHAR_CONST;
 }
 
-static TokenType lex_parse_number(LexerState *lexer) {
+static SchismTokenType lex_parse_number(LexerState *lexer) {
     I64 start_pos = lexer->buffer_pos;
     Bool is_float = false;
     
@@ -790,7 +864,7 @@ static TokenType lex_parse_number(LexerState *lexer) {
     return lexer->current_token;
 }
 
-static TokenType lex_parse_identifier(LexerState *lexer) {
+static SchismTokenType lex_parse_identifier(LexerState *lexer) {
     I64 start_pos = lexer->buffer_pos;
     
     while (lexer->buffer_pos < lexer->buffer_size &&
@@ -822,17 +896,17 @@ static TokenType lex_parse_identifier(LexerState *lexer) {
  * Utility functions
  */
 
-TokenType lex_peek_token(LexerState *lexer) {
+SchismTokenType lex_peek_token(LexerState *lexer) {
     if (!lexer) return TK_EOF;
     
     I64 saved_pos = lexer->buffer_pos;
     I64 saved_line = lexer->buffer_line;
     I64 saved_column = lexer->buffer_column;
-    TokenType saved_token = lexer->current_token;
+    SchismTokenType saved_token = lexer->current_token;
     U8 *saved_value = lexer->token_value;
     I64 saved_length = lexer->token_length;
     
-    TokenType token = lex_next_token(lexer);
+    SchismTokenType token = lex_next_token(lexer);
     
     lexer->buffer_pos = saved_pos;
     lexer->buffer_line = saved_line;

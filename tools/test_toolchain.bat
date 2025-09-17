@@ -1,47 +1,37 @@
 @echo off
-REM Test Script for SchismC Toolchain
-REM Verifies all required tools are available
-
 echo Testing SchismC Toolchain...
 echo =============================
 
-REM Set up Microsoft Build Tools environment
-set "VS_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64"
-
-REM Test GCC
 echo Testing GCC...
 gcc --version >nul 2>&1
-if errorlevel 1 (
+if %ERRORLEVEL% neq 0 (
     echo [FAIL] GCC not found
     goto :error
 ) else (
     echo [PASS] GCC available
 )
 
-REM Test MASM
 echo Testing MASM...
-"%VS_PATH%\ml64.exe" /? >nul 2>&1
-if errorlevel 1 (
-    echo [FAIL] MASM (ml64.exe) not found at %VS_PATH%
-    goto :error
+set "MASM_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\ml64.exe"
+if exist "%MASM_PATH%" (
+    echo [PASS] MASM found at %MASM_PATH%
 ) else (
-    echo [PASS] MASM available at %VS_PATH%
+    echo [FAIL] MASM not found at %MASM_PATH%
+    goto :error
 )
 
-REM Test Linker
 echo Testing Linker...
-"%VS_PATH%\link.exe" /? >nul 2>&1
-if errorlevel 1 (
-    echo [FAIL] Linker (link.exe) not found at %VS_PATH%
-    goto :error
+set "LINK_PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\link.exe"
+if exist "%LINK_PATH%" (
+    echo [PASS] Linker found at %LINK_PATH%
 ) else (
-    echo [PASS] Linker available at %VS_PATH%
+    echo [FAIL] Linker not found at %LINK_PATH%
+    goto :error
 )
 
-REM Test Make
 echo Testing Make...
 make --version >nul 2>&1
-if errorlevel 1 (
+if %ERRORLEVEL% neq 0 (
     echo [FAIL] Make not found
     goto :error
 ) else (

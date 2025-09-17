@@ -9,10 +9,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+
+/* Define TRUE and FALSE if not already defined */
+#ifndef TRUE
+#define TRUE 1
+#endif
+#ifndef FALSE
+#define FALSE 0
+#endif
+
 /* Forward declarations */
 ASTNode* parse_program(ParserState *parser);
 ASTNode* parse_statement(ParserState *parser);
 ASTNode* parse_assignment_or_expression_statement(ParserState *parser);
+ASTNode* parse_simple_expression(ParserState *parser);
+ASTNode* parse_range_comparison(ParserState *parser, ASTNode *first_expr);
 
 /*
  * Parser management functions
@@ -29,6 +40,9 @@ ParserState* parser_new(LexerState *lexer, CCmpCtrl *cc) {
     parser->error_count = 0;
     parser->warning_count = 0;
     parser->last_error = NULL;
+    
+    /* Initialize error recovery state */
+    parser_init_recovery_state(parser);
     
     /* Initialize symbol table */
     parser->symbol_table.capacity = 256;
@@ -201,15 +215,15 @@ void ast_node_add_sibling(ASTNode *node, ASTNode *sibling) {
  * Utility functions
  */
 
-TokenType parser_current_token(ParserState *parser) {
+SchismTokenType parser_current_token(ParserState *parser) {
     if (!parser || !parser->lexer) return TK_EOF;
     return parser->lexer->current_token;
 }
 
-TokenType parser_next_token(ParserState *parser) {
+SchismTokenType parser_next_token(ParserState *parser) {
     if (!parser || !parser->lexer) return TK_EOF;
     printf("DEBUG: parser_next_token - calling lex_next_token\n");
-    TokenType token = lex_next_token(parser->lexer);
+    SchismTokenType token = lex_next_token(parser->lexer);
     printf("DEBUG: parser_next_token - got token: %d\n", token);
     return token;
 }
@@ -229,7 +243,7 @@ I64 parser_current_column(ParserState *parser) {
     return parser->lexer->buffer_column;
 }
 
-Bool parser_match_token(ParserState *parser, TokenType token) {
+Bool parser_match_token(ParserState *parser, SchismTokenType token) {
     if (parser_current_token(parser) == token) {
         parser_next_token(parser);
         return true;
@@ -237,8 +251,8 @@ Bool parser_match_token(ParserState *parser, TokenType token) {
     return false;
 }
 
-TokenType parser_expect_token(ParserState *parser, TokenType expected) {
-    TokenType current = parser_current_token(parser);
+SchismTokenType parser_expect_token(ParserState *parser, SchismTokenType expected) {
+    SchismTokenType current = parser_current_token(parser);
     printf("DEBUG: parser_expect_token - expecting %d, current token: %d\n", expected, current);
     if (current == expected) {
         printf("DEBUG: parser_expect_token - token matches, calling parser_next_token\n");
@@ -273,18 +287,439 @@ void parser_error(ParserState *parser, U8 *message) {
     parser->last_error = (U8*)malloc(message_len);
     if (parser->last_error) {
         snprintf((char*)parser->last_error, message_len, 
-                "Parse error at line %ld, column %ld: %s", 
+                "Parse error at line %I64d, column %I64d: %s", 
                 line, column, message);
         printf("ERROR: %s\n", parser->last_error);
     }
+    
+    /* Attempt error recovery if not already in recovery mode */
+    if (!parser_is_in_recovery_mode(parser) && parser_can_recover(parser)) {
+        printf("Attempting error recovery...\n");
+        
+        /* Try different recovery strategies based on error context */
+        Bool recovered = FALSE;
+        
+        /* Try to recover from syntax errors */
+        if (strstr((char*)message, "Expected") || strstr((char*)message, "syntax")) {
+            recovered = parser_recover_from_syntax_error(parser, (U8*)"syntax error");
+        }
+        
+        /* Try to recover from missing tokens */
+        if (!recovered && strstr((char*)message, "missing")) {
+            recovered = parser_recover_from_missing_token(parser, ';');
+        }
+        
+        /* Try to recover from unexpected tokens */
+        if (!recovered && strstr((char*)message, "unexpected")) {
+            recovered = parser_recover_from_unexpected_token(parser, parser_current_token(parser));
+        }
+        
+        /* Default recovery: skip to semicolon */
+        if (!recovered) {
+            recovered = parser_recover_from_incomplete_statement(parser);
+        }
+        
+        if (recovered) {
+            printf("Error recovery successful, continuing parsing...\n");
+        } else {
+            printf("Error recovery failed, stopping parsing.\n");
+        }
+    }
 }
 
-void parser_expected_error(ParserState *parser, TokenType expected, TokenType found) {
+void parser_expected_error(ParserState *parser, SchismTokenType expected, SchismTokenType found) {
     U8 error_msg[256];
     snprintf((char*)error_msg, sizeof(error_msg),
             "Expected token %d, but found token %d", expected, found);
     
     parser_error(parser, error_msg);
+}
+
+/*
+ * Error recovery implementation
+ */
+
+/* Initialize error recovery state */
+void parser_init_recovery_state(ParserState *parser) {
+    if (!parser) return;
+    
+    parser->recovery_mode = FALSE;
+    parser->recovery_depth = 0;
+    parser->max_recovery_depth = 10;
+    parser->recovery_attempts = 0;
+    parser->max_recovery_attempts = 5;
+    parser->recovery_successful = FALSE;
+    
+    /* Initialize recovery state */
+    parser->recovery_state.saved_buffer_pos = 0;
+    parser->recovery_state.saved_buffer_line = 0;
+    parser->recovery_state.saved_buffer_column = 0;
+    parser->recovery_state.saved_current_token = TK_EOF;
+    parser->recovery_state.saved_token_value = NULL;
+    parser->recovery_state.saved_token_length = 0;
+    parser->recovery_state.saved_error_count = 0;
+    parser->recovery_state.saved_warning_count = 0;
+}
+
+/* Set recovery mode */
+void parser_set_recovery_mode(ParserState *parser, Bool enabled) {
+    if (!parser) return;
+    parser->recovery_mode = enabled;
+}
+
+/* Check if in recovery mode */
+Bool parser_is_in_recovery_mode(ParserState *parser) {
+    if (!parser) return FALSE;
+    return parser->recovery_mode;
+}
+
+/* Check if recovery is possible */
+Bool parser_can_recover(ParserState *parser) {
+    if (!parser) return FALSE;
+    return parser->recovery_depth < parser->max_recovery_depth &&
+           parser->recovery_attempts < parser->max_recovery_attempts;
+}
+
+/* Save recovery state */
+void parser_save_recovery_state(ParserState *parser) {
+    if (!parser) return;
+    
+    parser->recovery_state.saved_buffer_pos = parser->lexer->buffer_pos;
+    parser->recovery_state.saved_buffer_line = parser->lexer->token_line;
+    parser->recovery_state.saved_buffer_column = parser->lexer->token_column;
+    parser->recovery_state.saved_current_token = parser->lexer->current_token;
+    parser->recovery_state.saved_token_value = parser->lexer->token_value ? strdup((char*)parser->lexer->token_value) : NULL;
+    parser->recovery_state.saved_token_length = parser->lexer->token_length;
+    parser->recovery_state.saved_error_count = parser->error_count;
+    parser->recovery_state.saved_warning_count = parser->warning_count;
+}
+
+/* Restore recovery state */
+void parser_restore_recovery_state(ParserState *parser) {
+    if (!parser) return;
+    
+    parser->lexer->buffer_pos = parser->recovery_state.saved_buffer_pos;
+    parser->lexer->token_line = parser->recovery_state.saved_buffer_line;
+    parser->lexer->token_column = parser->recovery_state.saved_buffer_column;
+    parser->lexer->current_token = parser->recovery_state.saved_current_token;
+    if (parser->lexer->token_value) {
+        free(parser->lexer->token_value);
+    }
+    parser->lexer->token_value = parser->recovery_state.saved_token_value;
+    parser->lexer->token_length = parser->recovery_state.saved_token_length;
+    parser->error_count = parser->recovery_state.saved_error_count;
+    parser->warning_count = parser->recovery_state.saved_warning_count;
+}
+
+/* Skip to semicolon */
+Bool parser_skip_to_semicolon(ParserState *parser) {
+    if (!parser || !parser->lexer) return FALSE;
+    
+    I64 tokens_skipped = 0;
+    I64 max_skip = 50; /* Prevent infinite loops */
+    
+    while (parser->lexer->current_token != ';' && 
+           parser->lexer->current_token != TK_EOF && 
+           tokens_skipped < max_skip) {
+        lex_next_token(parser->lexer);
+        tokens_skipped++;
+    }
+    
+    if (parser->lexer->current_token == ';') {
+        lex_next_token(parser->lexer); /* consume semicolon */
+        return TRUE;
+    }
+    
+    return FALSE;
+}
+
+/* Skip to matching brace */
+Bool parser_skip_to_brace(ParserState *parser, SchismTokenType open_brace, SchismTokenType close_brace) {
+    if (!parser || !parser->lexer) return FALSE;
+    
+    I64 brace_depth = 0;
+    I64 tokens_skipped = 0;
+    I64 max_skip = 200; /* Prevent infinite loops */
+    
+    while (tokens_skipped < max_skip) {
+        if (parser->lexer->current_token == open_brace) {
+            brace_depth++;
+        } else if (parser->lexer->current_token == close_brace) {
+            if (brace_depth == 0) {
+                lex_next_token(parser->lexer); /* consume closing brace */
+                return TRUE;
+            }
+            brace_depth--;
+        } else if (parser->lexer->current_token == TK_EOF) {
+            break;
+        }
+        
+        lex_next_token(parser->lexer);
+        tokens_skipped++;
+    }
+    
+    return FALSE;
+}
+
+/* Skip to specific keyword */
+Bool parser_skip_to_keyword(ParserState *parser, U8 *keyword) {
+    if (!parser || !parser->lexer || !keyword) return FALSE;
+    
+    I64 tokens_skipped = 0;
+    I64 max_skip = 100; /* Prevent infinite loops */
+    
+    while (tokens_skipped < max_skip) {
+        if (parser->lexer->current_token == TK_IDENT && 
+            parser->lexer->token_value &&
+            strcmp((char*)parser->lexer->token_value, (char*)keyword) == 0) {
+            return TRUE;
+        }
+        
+        if (parser->lexer->current_token == TK_EOF) {
+            break;
+        }
+        
+        lex_next_token(parser->lexer);
+        tokens_skipped++;
+    }
+    
+    return FALSE;
+}
+
+/* Skip to newline */
+Bool parser_skip_to_newline(ParserState *parser) {
+    if (!parser || !parser->lexer) return FALSE;
+    
+    I64 tokens_skipped = 0;
+    I64 max_skip = 50; /* Prevent infinite loops */
+    
+    while (tokens_skipped < max_skip) {
+        if (parser->lexer->current_token == '\n' || 
+            parser->lexer->current_token == TK_EOF) {
+            if (parser->lexer->current_token == '\n') {
+                lex_next_token(parser->lexer); /* consume newline */
+            }
+            return TRUE;
+        }
+        
+        lex_next_token(parser->lexer);
+        tokens_skipped++;
+    }
+    
+    return FALSE;
+}
+
+/* Insert missing token (simulate by not consuming current token) */
+Bool parser_insert_missing_token(ParserState *parser, SchismTokenType token) {
+    if (!parser) return FALSE;
+    
+    /* For now, just report the insertion */
+    U8 msg[256];
+    snprintf((char*)msg, sizeof(msg), "Inserted missing token %d", token);
+    parser_warning(parser, msg);
+    
+    return TRUE;
+}
+
+/* Delete current token */
+Bool parser_delete_current_token(ParserState *parser) {
+    if (!parser || !parser->lexer) return FALSE;
+    
+    U8 msg[256];
+    snprintf((char*)msg, sizeof(msg), "Deleted unexpected token %d", parser->lexer->current_token);
+    parser_warning(parser, msg);
+    
+    lex_next_token(parser->lexer);
+    return TRUE;
+}
+
+/* Replace current token */
+Bool parser_replace_current_token(ParserState *parser, SchismTokenType new_token) {
+    if (!parser || !parser->lexer) return FALSE;
+    
+    U8 msg[256];
+    snprintf((char*)msg, sizeof(msg), "Replaced token %d with %d", 
+             parser->lexer->current_token, new_token);
+    parser_warning(parser, msg);
+    
+    parser->lexer->current_token = new_token;
+    return TRUE;
+}
+
+/* Restart statement */
+Bool parser_restart_statement(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    /* Skip to next statement boundary */
+    return parser_skip_to_semicolon(parser);
+}
+
+/* Restart function */
+Bool parser_restart_function(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    /* Skip to next function or end of file */
+    return parser_skip_to_keyword(parser, (U8*)"I64") || 
+           parser_skip_to_keyword(parser, (U8*)"U64") ||
+           parser_skip_to_keyword(parser, (U8*)"F64");
+}
+
+/* Restart block */
+Bool parser_restart_block(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    /* Skip to matching closing brace */
+    return parser_skip_to_brace(parser, '{', '}');
+}
+
+/* Main error recovery function */
+Bool parser_attempt_error_recovery(ParserState *parser, ErrorRecoveryInfo *recovery) {
+    if (!parser || !recovery) return FALSE;
+    
+    if (!parser_can_recover(parser)) {
+        return FALSE;
+    }
+    
+    parser->recovery_attempts++;
+    parser->recovery_depth++;
+    parser->recovery_mode = TRUE;
+    
+    Bool success = FALSE;
+    
+    switch (recovery->strategy) {
+        case RECOVERY_SKIP_TO_SEMICOLON:
+            success = parser_skip_to_semicolon(parser);
+            break;
+            
+        case RECOVERY_SKIP_TO_BRACE:
+            success = parser_skip_to_brace(parser, '{', '}');
+            break;
+            
+        case RECOVERY_SKIP_TO_PAREN:
+            success = parser_skip_to_brace(parser, '(', ')');
+            break;
+            
+        case RECOVERY_SKIP_TO_KEYWORD:
+            success = parser_skip_to_keyword(parser, recovery->target_keyword);
+            break;
+            
+        case RECOVERY_SKIP_TO_NEWLINE:
+            success = parser_skip_to_newline(parser);
+            break;
+            
+        case RECOVERY_INSERT_TOKEN:
+            success = parser_insert_missing_token(parser, recovery->target_token);
+            break;
+            
+        case RECOVERY_DELETE_TOKEN:
+            success = parser_delete_current_token(parser);
+            break;
+            
+        case RECOVERY_REPLACE_TOKEN:
+            success = parser_replace_current_token(parser, recovery->target_token);
+            break;
+            
+        case RECOVERY_RESTART_STATEMENT:
+            success = parser_restart_statement(parser);
+            break;
+            
+        case RECOVERY_RESTART_FUNCTION:
+            success = parser_restart_function(parser);
+            break;
+            
+        case RECOVERY_RESTART_BLOCK:
+            success = parser_restart_block(parser);
+            break;
+            
+        default:
+            success = FALSE;
+            break;
+    }
+    
+    parser->recovery_successful = success;
+    parser->recovery_depth--;
+    
+    if (success) {
+        parser->recovery_mode = FALSE;
+        parser->recovery_attempts = 0;
+    }
+    
+    return success;
+}
+
+/* Context-aware error recovery functions */
+Bool parser_recover_from_syntax_error(ParserState *parser, U8 *context) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    
+    /* Choose recovery strategy based on context */
+    if (strstr((char*)context, "statement")) {
+        recovery.strategy = RECOVERY_SKIP_TO_SEMICOLON;
+    } else if (strstr((char*)context, "function")) {
+        recovery.strategy = RECOVERY_SKIP_TO_BRACE;
+    } else if (strstr((char*)context, "expression")) {
+        recovery.strategy = RECOVERY_SKIP_TO_SEMICOLON;
+    } else {
+        recovery.strategy = RECOVERY_SKIP_TO_NEWLINE;
+    }
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_missing_token(ParserState *parser, SchismTokenType expected) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_INSERT_TOKEN;
+    recovery.target_token = expected;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_unexpected_token(ParserState *parser, SchismTokenType unexpected) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_DELETE_TOKEN;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_incomplete_statement(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_SKIP_TO_SEMICOLON;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_incomplete_expression(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_SKIP_TO_SEMICOLON;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_incomplete_function(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_SKIP_TO_BRACE;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
+}
+
+Bool parser_recover_from_incomplete_block(ParserState *parser) {
+    if (!parser) return FALSE;
+    
+    ErrorRecoveryInfo recovery = {0};
+    recovery.strategy = RECOVERY_SKIP_TO_BRACE;
+    
+    return parser_attempt_error_recovery(parser, &recovery);
 }
 
 /*
@@ -349,10 +784,11 @@ ASTNode* parse_statement(ParserState *parser) {
         case ';': token_name = "SEMICOLON"; break;
         case '}': token_name = "CLOSE_BRACE"; break;
         case TK_EOF: token_name = "TK_EOF"; break;
+        default: token_name = "UNKNOWN"; break;
     }
     printf("DEBUG: parse_statement - token: %d (%s)\n", parser_current_token(parser), token_name);
     
-    TokenType current = parser_current_token(parser);
+    SchismTokenType current = parser_current_token(parser);
     
     /* Parse statement based on current token */
     
@@ -361,6 +797,8 @@ ASTNode* parse_statement(ParserState *parser) {
             return parse_if_statement(parser);
         case TK_WHILE:
             return parse_while_statement(parser);
+        case TK_DO:
+            return parse_do_while_statement(parser);
         case TK_FOR:
             return parse_for_statement(parser);
         case TK_SWITCH:
@@ -373,6 +811,72 @@ ASTNode* parse_statement(ParserState *parser) {
             return parse_continue_statement(parser);
         case TK_GOTO:
             return parse_goto_statement(parser);
+        case TK_ASM:
+            return parse_inline_assembly_block(parser);
+        case TK_REG:
+        case TK_NOREG:
+            return parse_register_directive(parser);
+        case TK_TRY:
+            return parse_try_block(parser);
+        case TK_THROW:
+            return parse_throw_statement(parser);
+        case TK_CLASS:
+        case TK_UNION:
+        case TK_PUBLIC:
+            /* Check if this is a type-prefixed union (public I64i union I64) */
+            if (current == TK_PUBLIC || current == TK_IDENT) {
+                /* Save position and check for type-prefixed union pattern */
+                parser_save_position(parser);
+                Bool is_type_prefixed = false;
+                
+                if (current == TK_PUBLIC) {
+                    parser_next_token(parser); /* consume 'public' */
+                }
+                
+                /* Check if next token is an identifier (prefix type) */
+                if (parser_current_token(parser) == TK_IDENT) {
+                    parser_next_token(parser); /* consume prefix type */
+                    
+                    /* Check if next token is 'union' */
+                    if (parser_current_token(parser) == TK_UNION) {
+                        is_type_prefixed = true;
+                    }
+                }
+                
+                /* Restore position */
+                parser_restore_position(parser);
+                
+                if (is_type_prefixed) {
+                    return parse_type_prefixed_union(parser);
+                }
+            }
+            return parse_class_definition(parser);
+        case TK_IDENT:
+            /* Check if this is a label (identifier followed by ':' or '::') */
+            {
+                /* Save current position and token */
+                I64 saved_buffer_pos = parser->lexer->buffer_pos;
+                SchismTokenType saved_token = parser->lexer->current_token;
+                printf("DEBUG: TK_IDENT case - saved buffer pos: %lld, current token: %d\n", saved_buffer_pos, parser_current_token(parser));
+                
+                /* Look ahead to see if next token is ':' or '::' */
+                parser_next_token(parser);
+                printf("DEBUG: TK_IDENT case - after lookahead, current token: %d\n", parser_current_token(parser));
+                if (parser_current_token(parser) == ':' || parser_current_token(parser) == TK_DBL_COLON) {
+                    /* Restore position and parse as label */
+                    printf("DEBUG: TK_IDENT case - parsing as label\n");
+                    parser->lexer->buffer_pos = saved_buffer_pos;
+                    parser->lexer->current_token = saved_token;
+                    return parse_label_statement(parser);
+                } else {
+                    /* Restore position and parse as variable/expression */
+                    printf("DEBUG: TK_IDENT case - restoring position to %lld, parsing as assignment/expression\n", saved_buffer_pos);
+                    parser->lexer->buffer_pos = saved_buffer_pos;
+                    parser->lexer->current_token = saved_token;
+                    printf("DEBUG: TK_IDENT case - after restore, current token: %d\n", parser_current_token(parser));
+                    return parse_assignment_or_expression_statement(parser);
+                }
+            }
         case '{':
             return parse_block_statement(parser);
         case TK_STR:
@@ -380,12 +884,60 @@ ASTNode* parse_statement(ParserState *parser) {
             /* For string literals, bypass the assignment parsing and go directly to expression parsing */
             /* This avoids the problematic code path that causes hanging */
             return parse_expression_statement(parser);
-        case TK_I64:
-        case TK_F64:
         case TK_CHAR_CONST:
-        case TK_IDENT:
             /* Try to parse as assignment statement first */
             return parse_assignment_or_expression_statement(parser);
+        case TK_TYPE_I0:
+        case TK_TYPE_I8:
+        case TK_TYPE_I16:
+        case TK_TYPE_I32:
+        case TK_TYPE_I64:
+        case TK_TYPE_U0:
+        case TK_TYPE_U8:
+        case TK_TYPE_U16:
+        case TK_TYPE_U32:
+        case TK_TYPE_U64:
+        case TK_TYPE_F32:
+        case TK_TYPE_F64:
+        case TK_TYPE_BOOL:
+        case TK_TYPE_STRING:
+            printf("DEBUG: parse_statement - found type token %d, checking if function or variable\n", current);
+            /* Check if this is a function or variable declaration */
+            /* Save current position before parsing */
+            parser_save_position(parser);
+            
+            /* Parse type specifier */
+            ASTNode *type_node = parse_type_specifier(parser);
+            if (!type_node) {
+                parser_restore_position(parser);
+                return parse_expression_statement(parser);
+            }
+            
+            /* Check if next token is identifier */
+            if (parser_current_token(parser) != TK_IDENT) {
+                ast_node_free(type_node);
+                parser_restore_position(parser);
+                return parse_variable_declaration(parser);
+            }
+            
+            /* Move past identifier */
+            parser_next_token(parser);
+            
+            /* Check if next token is '(' - indicates function declaration */
+            if (parser_current_token(parser) == '(') {
+                /* This is a function declaration - restore position and parse as function */
+                ast_node_free(type_node);
+                parser_restore_position(parser);
+                return parse_function_declaration(parser);
+            } else {
+                /* This is a variable declaration - restore position and parse as variable */
+                ast_node_free(type_node);
+                parser_restore_position(parser);
+                return parse_variable_declaration(parser);
+            }
+        case TK_AUTO:
+            printf("DEBUG: parse_statement - found TK_AUTO, calling parse_type_inference\n");
+            return parse_type_inference(parser);
         default:
             /* Check for type tokens */
             if (current >= TK_TYPE_I0 && current <= TK_TYPE_STRING) {
@@ -443,7 +995,7 @@ ASTNode* parse_assignment_or_expression_statement(ParserState *parser) {
     
     /* Look ahead to see what comes after the identifier */
     parser_next_token(parser); /* Consume identifier */
-    TokenType op = parser_current_token(parser);
+    SchismTokenType op = parser_current_token(parser);
     
     if (op == '(') {
         /* This is a function call - parse it */
@@ -498,9 +1050,56 @@ ASTNode* parse_assignment_or_expression_statement(ParserState *parser) {
         
         return assign_node;
     } else {
-        /* This is an expression statement, back up and parse normally */
-        /* We need to reset the lexer position, but for now just parse as expression */
-        return parse_expression_statement(parser);
+        /* This could be a comma expression or other expression */
+        /* We've already consumed the identifier, so create an identifier node */
+        ASTNode *ident_node = ast_node_new(NODE_IDENTIFIER, parser_current_line(parser), parser_current_column(parser));
+        if (!ident_node) return NULL;
+        
+        /* Set identifier name */
+        if (var_name) {
+            I64 len = strlen((char*)var_name);
+            ident_node->data.identifier.name = (U8*)malloc(len + 1);
+            if (ident_node->data.identifier.name) {
+                strcpy((char*)ident_node->data.identifier.name, (char*)var_name);
+            }
+        }
+        
+        /* Check if this is a comma expression */
+        if (parser_current_token(parser) == ',') {
+            printf("DEBUG: parse_assignment_or_expression_statement - found comma, creating comma expression\n");
+            
+            /* This is a comma expression */
+            parser_next_token(parser); /* Consume comma */
+            
+            /* Parse the right side */
+            ASTNode *right = parse_comma_expression(parser);
+            if (!right) {
+                ast_node_free(ident_node);
+                return NULL;
+            }
+            
+            /* Create comma expression node */
+            ASTNode *comma_node = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+            if (!comma_node) {
+                ast_node_free(ident_node);
+                ast_node_free(right);
+                return NULL;
+            }
+            
+            comma_node->data.binary_op.left = ident_node;
+            comma_node->data.binary_op.right = right;
+            comma_node->data.binary_op.op = BINOP_COMMA;
+            
+            /* Expect semicolon */
+            parser_expect_token(parser, ';');
+            
+            return comma_node;
+        } else {
+            /* Just a single identifier expression */
+            /* Expect semicolon */
+            parser_expect_token(parser, ';');
+            return ident_node;
+        }
     }
     
     return NULL; /* Should never reach here */
@@ -528,8 +1127,8 @@ ASTNode* parse_expression_statement(ParserState *parser) {
 ASTNode* parse_expression(ParserState *parser) {
     if (!parser) return NULL;
     
-    /* Parse logical OR expressions (lowest precedence) */
-    return parse_logical_or_expression(parser);
+    /* Parse comma expressions (lowest precedence) */
+    return parse_comma_expression(parser);
 }
 
 ASTNode* parse_additive_expression(ParserState *parser) {
@@ -541,7 +1140,7 @@ ASTNode* parse_additive_expression(ParserState *parser) {
     
     /* Parse additive operators (+, -) */
     while (parser_current_token(parser) == '+' || parser_current_token(parser) == '-') {
-        TokenType op = parser_current_token(parser);
+        SchismTokenType op = parser_current_token(parser);
         parser_next_token(parser); /* Consume operator */
         
         ASTNode *right = parse_multiplicative_expression(parser);
@@ -577,7 +1176,7 @@ ASTNode* parse_multiplicative_expression(ParserState *parser) {
     
     /* Parse multiplicative operators (*, /, %) */
     while (parser_current_token(parser) == '*' || parser_current_token(parser) == '/' || parser_current_token(parser) == '%') {
-        TokenType op = parser_current_token(parser);
+        SchismTokenType op = parser_current_token(parser);
         parser_next_token(parser); /* Consume operator */
         
         ASTNode *right = parse_primary_expression(parser);
@@ -614,7 +1213,7 @@ ASTNode* parse_multiplicative_expression(ParserState *parser) {
 ASTNode* parse_primary_expression(ParserState *parser) {
     if (!parser) return NULL;
     
-    TokenType current = parser_current_token(parser);
+    SchismTokenType current = parser_current_token(parser);
     I64 line = parser_current_line(parser);
     I64 column = parser_current_column(parser);
     
@@ -688,17 +1287,38 @@ ASTNode* parse_primary_expression(ParserState *parser) {
         }
         
         case TK_CHAR_CONST: {
-            /* Character constant */
-            ASTNode *node = ast_node_new(NODE_CHAR, line, column);
-            if (!node) return NULL;
-            
+            /* Character constant - check if it's multi-character */
             U8 *value = parser_current_token_value(parser);
-            if (value && strlen((char*)value) > 0) {
-                node->data.literal.char_value = value[0];
+            if (value && strlen((char*)value) > 1) {
+                /* Multi-character constant */
+                printf("DEBUG: Found multi-character constant: %s\n", value);
+                ASTNode *node = ast_node_new(NODE_MULTI_CHAR_CONST, line, column);
+                if (!node) return NULL;
+                
+                node->data.multi_char_const.value = value;
+                node->data.multi_char_const.length = strlen((char*)value);
+                
+                /* Calculate integer value from character sequence */
+                I64 int_value = 0;
+                for (I64 i = 0; i < node->data.multi_char_const.length; i++) {
+                    int_value = (int_value << 8) | value[i];
+                }
+                node->data.multi_char_const.int_value = int_value;
+                
+                parser_next_token(parser);
+                return node;
+            } else {
+                /* Single character constant */
+                ASTNode *node = ast_node_new(NODE_CHAR, line, column);
+                if (!node) return NULL;
+                
+                if (value && strlen((char*)value) > 0) {
+                    node->data.literal.char_value = value[0];
+                }
+                
+                parser_next_token(parser);
+                return node;
             }
-            
-            parser_next_token(parser);
-            return node;
         }
         
         case TK_IDENT: {
@@ -708,9 +1328,21 @@ ASTNode* parse_primary_expression(ParserState *parser) {
             
             /* Check if this is a function call */
             if (parser_current_token(parser) == '(') {
-                /* Function call */
+                /* Function call with parentheses */
                 return parse_function_call(parser, name, line, column);
             } else {
+                /* Check if this is a function call without parentheses */
+                /* In HolyC, function calls without parentheses are allowed */
+                if (parser_is_function_defined_in_scope(parser, name)) {
+                    printf("DEBUG: Found function call without parentheses: %s\n", name);
+                    ASTNode *func_call_node = ast_node_new(NODE_FUNC_CALL_NO_PARENS, line, column);
+                    if (func_call_node) {
+                        func_call_node->data.func_call_no_parens.name = name;
+                        func_call_node->data.func_call_no_parens.arguments = NULL; /* No arguments */
+                        func_call_node->data.func_call_no_parens.return_type = (U8*)"I64"; /* Default return type */
+                        return func_call_node;
+                    }
+                }
                 /* Variable reference - check if variable is defined in scope */
                 if (!parser_is_variable_defined_in_scope(parser, name)) {
                     printf("WARNING: Variable '%s' is not defined in current scope\n", name);
@@ -727,6 +1359,44 @@ ASTNode* parse_primary_expression(ParserState *parser) {
                     }
                 }
                 
+                /* Check for sub-int access pattern (identifier.type[index]) FIRST */
+                if (parser_current_token(parser) == '.' && is_sub_int_access_pattern(parser)) {
+                    ASTNode *sub_int_access = parse_sub_int_access(parser);
+                    if (!sub_int_access) {
+                        ast_node_free(node);
+                        return NULL;
+                    }
+                    
+                    /* Set the base object for sub-int access */
+                    sub_int_access->data.sub_int_access.base_object = node;
+                    node = sub_int_access;
+                }
+                /* Check for member access */
+                else while (parser_current_token(parser) == '.' || parser_current_token(parser) == TK_DEREFERENCE) {
+                    ASTNode *member_access = parse_member_access(parser);
+                    if (!member_access) {
+                        ast_node_free(node);
+                        return NULL;
+                    }
+                    
+                    /* Set the object for member access */
+                    member_access->data.member_access.object = node;
+                    node = member_access;
+                }
+                
+                /* Check for array access AFTER member access */
+                while (parser_current_token(parser) == '[') {
+                    ASTNode *array_access = parse_array_access(parser);
+                    if (!array_access) {
+                        ast_node_free(node);
+                        return NULL;
+                    }
+                    
+                    /* Replace node with array_access */
+                    array_access->data.array_access.array = node;
+                    node = array_access;
+                }
+                
                 return node;
             }
         }
@@ -737,6 +1407,11 @@ ASTNode* parse_primary_expression(ParserState *parser) {
             ASTNode *expr = parse_expression(parser);
             parser_expect_token(parser, ')');
             return expr;
+        }
+        
+        case '{': {
+            /* Array initializer */
+            return parse_array_initializer(parser);
         }
         
         default:
@@ -882,14 +1557,364 @@ ASTNode* parse_while_statement(ParserState *parser) {
     return while_node;
 }
 
+ASTNode* parse_do_while_statement(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing do-while statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'do' keyword */
+    if (parser_current_token(parser) != TK_DO) {
+        parser_error(parser, (U8*)"Expected 'do' keyword");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'do' */
+    
+    /* Parse body statement */
+    ASTNode *body = parse_statement(parser);
+    if (!body) {
+        parser_error(parser, (U8*)"Expected statement after 'do'");
+        return NULL;
+    }
+    
+    /* Expect 'while' keyword */
+    if (parser_current_token(parser) != TK_WHILE) {
+        parser_error(parser, (U8*)"Expected 'while' after do statement");
+        ast_node_free(body);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'while' */
+    
+    /* Expect '(' */
+    if (parser_current_token(parser) != '(') {
+        parser_error(parser, (U8*)"Expected '(' after 'while'");
+        ast_node_free(body);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '(' */
+    
+    /* Parse condition expression */
+    ASTNode *condition = parse_expression(parser);
+    if (!condition) {
+        parser_error(parser, (U8*)"Expected condition expression in do-while statement");
+        ast_node_free(body);
+        return NULL;
+    }
+    
+    /* Expect ')' */
+    if (parser_current_token(parser) != ')') {
+        parser_error(parser, (U8*)"Expected ')' after do-while condition");
+        ast_node_free(body);
+        ast_node_free(condition);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ')' */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after do-while statement");
+        ast_node_free(body);
+        ast_node_free(condition);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create do-while statement node */
+    ASTNode *do_while_node = ast_node_new(NODE_DO_WHILE_STMT, line, column);
+    if (!do_while_node) {
+        ast_node_free(body);
+        ast_node_free(condition);
+        return NULL;
+    }
+    
+    /* Initialize do-while statement data */
+    do_while_node->data.do_while_stmt.body = body;
+    do_while_node->data.do_while_stmt.condition = condition;
+    
+    printf("DEBUG: Do-while statement parsed successfully\n");
+    return do_while_node;
+}
+
 ASTNode* parse_for_statement(ParserState *parser) {
-    parser_error(parser, (U8*)"for statement not yet implemented");
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing for statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'for' keyword */
+    if (parser_current_token(parser) != TK_FOR) {
+        parser_error(parser, (U8*)"Expected 'for' keyword");
     return NULL;
+    }
+    parser_next_token(parser); /* consume 'for' */
+    
+    /* Expect '(' */
+    if (parser_current_token(parser) != '(') {
+        parser_error(parser, (U8*)"Expected '(' after 'for'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '(' */
+    
+    /* Parse initialization (optional) */
+    ASTNode *init = NULL;
+    if (parser_current_token(parser) != ';') {
+        init = parse_statement(parser);
+        if (!init) {
+            parser_error(parser, (U8*)"Failed to parse for loop initialization");
+            return NULL;
+        }
+    }
+    
+    /* Expect ';' after initialization */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after for loop initialization");
+        if (init) ast_node_free(init);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Parse condition (optional) */
+    ASTNode *condition = NULL;
+    if (parser_current_token(parser) != ';') {
+        condition = parse_expression(parser);
+        if (!condition) {
+            parser_error(parser, (U8*)"Failed to parse for loop condition");
+            if (init) ast_node_free(init);
+            return NULL;
+        }
+    }
+    
+    /* Expect ';' after condition */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after for loop condition");
+        if (init) ast_node_free(init);
+        if (condition) ast_node_free(condition);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Parse increment (optional) */
+    ASTNode *increment = NULL;
+    if (parser_current_token(parser) != ')') {
+        increment = parse_expression(parser);
+        if (!increment) {
+            parser_error(parser, (U8*)"Failed to parse for loop increment");
+            if (init) ast_node_free(init);
+            if (condition) ast_node_free(condition);
+            return NULL;
+        }
+    }
+    
+    /* Expect ')' */
+    if (parser_current_token(parser) != ')') {
+        parser_error(parser, (U8*)"Expected ')' after for loop increment");
+        if (init) ast_node_free(init);
+        if (condition) ast_node_free(condition);
+        if (increment) ast_node_free(increment);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ')' */
+    
+    /* Parse body statement */
+    ASTNode *body = parse_statement(parser);
+    if (!body) {
+        parser_error(parser, (U8*)"Expected statement after for loop");
+        if (init) ast_node_free(init);
+        if (condition) ast_node_free(condition);
+        if (increment) ast_node_free(increment);
+        return NULL;
+    }
+    
+    /* Create for statement node */
+    ASTNode *for_node = ast_node_new(NODE_FOR_STMT, line, column);
+    if (!for_node) {
+        if (init) ast_node_free(init);
+        if (condition) ast_node_free(condition);
+        if (increment) ast_node_free(increment);
+        ast_node_free(body);
+        return NULL;
+    }
+    
+    /* Initialize for statement data */
+    for_node->data.for_stmt.init = init;
+    for_node->data.for_stmt.condition = condition;
+    for_node->data.for_stmt.increment = increment;
+    for_node->data.for_stmt.body = body;
+    
+    printf("DEBUG: For statement parsed successfully\n");
+    return for_node;
 }
 
 ASTNode* parse_switch_statement(ParserState *parser) {
-    parser_error(parser, (U8*)"switch statement not yet implemented");
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing switch statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'switch' keyword */
+    if (parser_current_token(parser) != TK_SWITCH) {
+        parser_error(parser, (U8*)"Expected 'switch' keyword");
     return NULL;
+    }
+    parser_next_token(parser); /* consume 'switch' */
+    
+    /* Check for nobounds switch (switch [expr]) */
+    Bool nobounds = false;
+    if (parser_current_token(parser) == '[') {
+        nobounds = true;
+        parser_next_token(parser); /* consume '[' */
+    }
+    
+    /* Expect '(' or '[' */
+    if (parser_current_token(parser) != '(' && parser_current_token(parser) != '[') {
+        parser_error(parser, (U8*)"Expected '(' or '[' after 'switch'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '(' or '[' */
+    
+    /* Parse switch expression */
+    ASTNode *expression = parse_expression(parser);
+    if (!expression) {
+        parser_error(parser, (U8*)"Expected expression in switch statement");
+        return NULL;
+    }
+    
+    /* Expect ')' or ']' */
+    if (parser_current_token(parser) != ')' && parser_current_token(parser) != ']') {
+        parser_error(parser, (U8*)"Expected ')' or ']' after switch expression");
+        ast_node_free(expression);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ')' or ']' */
+    
+    /* Expect '{' */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after switch statement");
+        ast_node_free(expression);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '{' */
+    
+    /* Parse case statements */
+    ASTNode *cases = NULL;
+    ASTNode *default_case = NULL;
+    ASTNode *last_case = NULL;
+    
+    while (parser_current_token(parser) != '}' && parser_current_token(parser) != TK_EOF) {
+        if (parser_current_token(parser) == TK_CASE) {
+            ASTNode *case_stmt = parse_case_statement(parser);
+            if (!case_stmt) {
+                parser_error(parser, (U8*)"Failed to parse case statement");
+                if (cases) ast_node_free(cases);
+                if (default_case) ast_node_free(default_case);
+                ast_node_free(expression);
+                return NULL;
+            }
+            
+            /* Add to cases list */
+            if (!cases) {
+                cases = case_stmt;
+                last_case = case_stmt;
+            } else {
+                last_case->next = case_stmt;
+                last_case = case_stmt;
+            }
+        } else if (parser_current_token(parser) == TK_DEFAULT) {
+            if (default_case) {
+                parser_error(parser, (U8*)"Multiple default cases in switch statement");
+                if (cases) ast_node_free(cases);
+                if (default_case) ast_node_free(default_case);
+                ast_node_free(expression);
+                return NULL;
+            }
+            
+            default_case = parse_default_statement(parser);
+            if (!default_case) {
+                parser_error(parser, (U8*)"Failed to parse default statement");
+                if (cases) ast_node_free(cases);
+                ast_node_free(expression);
+                return NULL;
+            }
+        } else if (parser_current_token(parser) == TK_START) {
+            /* Parse start block for sub-switch */
+            ASTNode *start_block = parse_start_end_block(parser, true);
+            if (!start_block) {
+                parser_error(parser, (U8*)"Failed to parse start block");
+                if (cases) ast_node_free(cases);
+                if (default_case) ast_node_free(default_case);
+                ast_node_free(expression);
+                return NULL;
+            }
+            
+            /* Add start block to cases list */
+            if (!cases) {
+                cases = start_block;
+                last_case = start_block;
+            } else {
+                last_case->next = start_block;
+                last_case = start_block;
+            }
+        } else if (parser_current_token(parser) == TK_END) {
+            /* Parse end block for sub-switch */
+            ASTNode *end_block = parse_start_end_block(parser, false);
+            if (!end_block) {
+                parser_error(parser, (U8*)"Failed to parse end block");
+                if (cases) ast_node_free(cases);
+                if (default_case) ast_node_free(default_case);
+                ast_node_free(expression);
+                return NULL;
+            }
+            
+            /* Add end block to cases list */
+            if (!cases) {
+                cases = end_block;
+                last_case = end_block;
+            } else {
+                last_case->next = end_block;
+                last_case = end_block;
+            }
+        } else {
+            parser_error(parser, (U8*)"Expected 'case', 'default', 'start', or 'end' in switch statement");
+            if (cases) ast_node_free(cases);
+            if (default_case) ast_node_free(default_case);
+            ast_node_free(expression);
+            return NULL;
+        }
+    }
+    
+    /* Expect '}' */
+    if (parser_current_token(parser) != '}') {
+        parser_error(parser, (U8*)"Expected '}' to close switch statement");
+        if (cases) ast_node_free(cases);
+        if (default_case) ast_node_free(default_case);
+        ast_node_free(expression);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '}' */
+    
+    /* Create switch statement node */
+    ASTNode *switch_node = ast_node_new(NODE_SWITCH, line, column);
+    if (!switch_node) {
+        if (cases) ast_node_free(cases);
+        if (default_case) ast_node_free(default_case);
+        ast_node_free(expression);
+        return NULL;
+    }
+    
+    /* Initialize switch statement data */
+    switch_node->data.switch_stmt.expression = expression;
+    switch_node->data.switch_stmt.cases = cases;
+    switch_node->data.switch_stmt.default_case = default_case;
+    switch_node->data.switch_stmt.nobounds = nobounds;
+    
+    printf("DEBUG: Switch statement parsed successfully\n");
+    return switch_node;
 }
 
 ASTNode* parse_return_statement(ParserState *parser) {
@@ -949,18 +1974,116 @@ ASTNode* parse_return_statement(ParserState *parser) {
 }
 
 ASTNode* parse_break_statement(ParserState *parser) {
-    parser_error(parser, (U8*)"break statement not yet implemented");
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing break statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'break' keyword */
+    if (parser_current_token(parser) != TK_BREAK) {
+        parser_error(parser, (U8*)"Expected 'break' keyword");
     return NULL;
+    }
+    parser_next_token(parser); /* consume 'break' */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after break statement");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create break statement node */
+    ASTNode *break_node = ast_node_new(NODE_BREAK, line, column);
+    if (!break_node) {
+        return NULL;
+    }
+    
+    printf("DEBUG: Break statement parsed successfully\n");
+    return break_node;
 }
 
 ASTNode* parse_continue_statement(ParserState *parser) {
-    parser_error(parser, (U8*)"continue statement not yet implemented");
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing continue statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'continue' keyword */
+    if (parser_current_token(parser) != TK_CONTINUE) {
+        parser_error(parser, (U8*)"Expected 'continue' keyword");
     return NULL;
+    }
+    parser_next_token(parser); /* consume 'continue' */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after continue statement");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create continue statement node */
+    ASTNode *continue_node = ast_node_new(NODE_CONTINUE, line, column);
+    if (!continue_node) {
+        return NULL;
+    }
+    
+    printf("DEBUG: Continue statement parsed successfully\n");
+    return continue_node;
 }
 
 ASTNode* parse_goto_statement(ParserState *parser) {
-    parser_error(parser, (U8*)"goto statement not yet implemented");
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing goto statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'goto' keyword */
+    if (parser_current_token(parser) != TK_GOTO) {
+        parser_error(parser, (U8*)"Expected 'goto' keyword");
     return NULL;
+    }
+    parser_next_token(parser); /* consume 'goto' */
+    
+    /* Parse label name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected label name after 'goto'");
+        return NULL;
+    }
+    
+    U8 *label_name = parser_current_token_value(parser);
+    if (!label_name) {
+        parser_error(parser, (U8*)"Failed to get label name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume label name */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after goto statement");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create goto statement node */
+    ASTNode *goto_node = ast_node_new(NODE_GOTO, line, column);
+    if (!goto_node) {
+        return NULL;
+    }
+    
+    /* Initialize goto statement data */
+    goto_node->data.goto_stmt.label_name = label_name;
+    goto_node->data.goto_stmt.jump_target = 0; /* Will be set during codegen */
+    
+    printf("DEBUG: Goto statement parsed successfully, target: %s\n", label_name);
+    return goto_node;
 }
 
 ASTNode* parse_block_statement(ParserState *parser) {
@@ -1034,7 +2157,7 @@ ASTNode* parse_block_statement(ParserState *parser) {
         if (stmt->type == NODE_STRING && statement_count == 1) {
             printf("DEBUG: parse_block_statement - detected string literal as first statement, checking for potential return statement\n");
             /* Check if the next token is a return statement */
-            TokenType next_token = parser_current_token(parser);
+            SchismTokenType next_token = parser_current_token(parser);
             if (next_token == TK_RETURN) {
                 printf("DEBUG: parse_block_statement - found return statement after string literal, applying workaround\n");
                 /* Force token advancement to ensure proper state */
@@ -1092,7 +2215,7 @@ ASTNode* parse_function_call(ParserState *parser, U8 *name, I64 line, I64 column
     /* Initialize call data */
     call_node->data.call.arguments = NULL;
     call_node->data.call.return_type = NULL;
-    call_node->data.call.return_reg = REG_NONE;
+    call_node->data.call.return_reg = X86_REG_NONE;
     call_node->data.call.arg_count = 0;
     call_node->data.call.stack_cleanup = 0;
     
@@ -1142,6 +2265,40 @@ ASTNode* parse_variable_declaration(ParserState *parser) {
     
     /* Move to next token */
     parser_next_token(parser);
+    
+    /* Check for array declaration */
+    if (parser_current_token(parser) == '[') {
+        parser_next_token(parser); /* consume '[' */
+        
+        /* Parse array size */
+        ASTNode *size_expr = NULL;
+        if (parser_current_token(parser) != ']') {
+            size_expr = parse_expression(parser);
+            if (!size_expr) {
+                parser_error(parser, (U8*)"Expected array size expression");
+                ast_node_free(type_node);
+                ast_node_free(var_node);
+                return NULL;
+            }
+        }
+        
+        /* Expect ']' */
+        if (parser_current_token(parser) != ']') {
+            parser_error(parser, (U8*)"Expected ']' after array size");
+            ast_node_free(type_node);
+            ast_node_free(var_node);
+            if (size_expr) ast_node_free(size_expr);
+            return NULL;
+        }
+        parser_next_token(parser); /* consume ']' */
+        
+        /* Mark variable as array */
+        var_node->data.identifier.is_array = true;
+        var_node->data.identifier.array_size = size_expr;
+    } else {
+        var_node->data.identifier.is_array = false;
+        var_node->data.identifier.array_size = NULL;
+    }
     
     /* Add variable to current scope */
     ScopeLevel *current_scope = parser_get_current_scope(parser);
@@ -1294,20 +2451,200 @@ ASTNode* parse_function_declaration(ParserState *parser) {
 }
 
 /* Placeholder implementations for all other functions */
-ASTNode* parse_assignment_expression(ParserState *parser) { return NULL; }
-ASTNode* parse_conditional_expression(ParserState *parser) { return NULL; }
+ASTNode* parse_comma_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: parse_comma_expression - starting, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse assignment expressions first */
+    ASTNode *left = parse_assignment_expression(parser);
+    if (!left) {
+        printf("DEBUG: parse_comma_expression - failed to parse left side\n");
+        return NULL;
+    }
+    
+    printf("DEBUG: parse_comma_expression - parsed left side, current token: %d\n", parser_current_token(parser));
+    
+    /* Check for comma operator */
+    if (parser_current_token(parser) == ',') {
+        printf("DEBUG: parse_comma_expression - found comma operator\n");
+        parser_next_token(parser); /* Consume comma */
+        
+        /* Parse right side */
+        ASTNode *right = parse_comma_expression(parser);
+        if (!right) {
+            printf("DEBUG: parse_comma_expression - failed to parse right side\n");
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        printf("DEBUG: parse_comma_expression - parsed right side, creating comma node\n");
+        
+        /* Create comma expression node (for HolyC string formatting) */
+        ASTNode *comma_node = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!comma_node) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        comma_node->data.binary_op.left = left;
+        comma_node->data.binary_op.right = right;
+        comma_node->data.binary_op.op = BINOP_COMMA;
+        
+        printf("DEBUG: parse_comma_expression - comma node created successfully\n");
+        return comma_node;
+    }
+    
+    printf("DEBUG: parse_comma_expression - no comma, returning left side\n");
+    return left;
+}
+
+ASTNode* parse_assignment_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: parse_assignment_expression - starting, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse conditional expressions first */
+    ASTNode *left = parse_conditional_expression(parser);
+    if (!left) {
+        printf("DEBUG: parse_assignment_expression - failed to parse conditional expression\n");
+        return NULL;
+    }
+    
+    printf("DEBUG: parse_assignment_expression - parsed conditional expression, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse assignment operators */
+    while (parser_current_token(parser) == '=' || 
+           parser_current_token(parser) == TK_ADD_EQU ||
+           parser_current_token(parser) == TK_SUB_EQU ||
+           parser_current_token(parser) == TK_MUL_EQU ||
+           parser_current_token(parser) == TK_DIV_EQU ||
+           parser_current_token(parser) == TK_MOD_EQU ||
+           parser_current_token(parser) == TK_AND_EQU ||
+           parser_current_token(parser) == TK_OR_EQU ||
+           parser_current_token(parser) == TK_XOR_EQU ||
+           parser_current_token(parser) == TK_SHL_EQU ||
+           parser_current_token(parser) == TK_SHR_EQU) {
+        
+        SchismTokenType op = parser_current_token(parser);
+        parser_next_token(parser); /* Consume operator */
+        
+        ASTNode *right = parse_assignment_expression(parser);
+        if (!right) {
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        /* Create binary operation node */
+        ASTNode *binop = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!binop) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        /* Map token to binary operator */
+        switch (op) {
+            case '=': binop->data.binary_op.op = BINOP_ASSIGN; break;
+            case TK_ADD_EQU: binop->data.binary_op.op = BINOP_ADD_ASSIGN; break;
+            case TK_SUB_EQU: binop->data.binary_op.op = BINOP_SUB_ASSIGN; break;
+            case TK_MUL_EQU: binop->data.binary_op.op = BINOP_MUL_ASSIGN; break;
+            case TK_DIV_EQU: binop->data.binary_op.op = BINOP_DIV_ASSIGN; break;
+            case TK_MOD_EQU: binop->data.binary_op.op = BINOP_MOD_ASSIGN; break;
+            case TK_AND_EQU: binop->data.binary_op.op = BINOP_AND_ASSIGN; break;
+            case TK_OR_EQU: binop->data.binary_op.op = BINOP_OR_ASSIGN; break;
+            case TK_XOR_EQU: binop->data.binary_op.op = BINOP_XOR_ASSIGN; break;
+            case TK_SHL_EQU: binop->data.binary_op.op = BINOP_SHL_ASSIGN; break;
+            case TK_SHR_EQU: binop->data.binary_op.op = BINOP_SHR_ASSIGN; break;
+            default: binop->data.binary_op.op = BINOP_ASSIGN; break;
+        }
+        
+        binop->data.binary_op.left = left;
+        binop->data.binary_op.right = right;
+        
+        left = binop;
+    }
+    
+    return left;
+}
+
+ASTNode* parse_conditional_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: parse_conditional_expression - starting, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse logical OR expressions first */
+    ASTNode *condition = parse_logical_or_expression(parser);
+    if (!condition) {
+        printf("DEBUG: parse_conditional_expression - failed to parse logical OR expression\n");
+        return NULL;
+    }
+    
+    printf("DEBUG: parse_conditional_expression - parsed logical OR expression, current token: %d\n", parser_current_token(parser));
+    
+    /* Check for ternary operator (condition ? true_expr : false_expr) */
+    if (parser_current_token(parser) == '?') {
+        parser_next_token(parser); /* Consume '?' */
+        
+        ASTNode *true_expr = parse_expression(parser);
+        if (!true_expr) {
+            ast_node_free(condition);
+            return NULL;
+        }
+        
+        if (parser_current_token(parser) != ':') {
+            parser_error(parser, (U8*)"Expected ':' in ternary operator");
+            ast_node_free(condition);
+            ast_node_free(true_expr);
+            return NULL;
+        }
+        parser_next_token(parser); /* Consume ':' */
+        
+        ASTNode *false_expr = parse_conditional_expression(parser);
+        if (!false_expr) {
+            ast_node_free(condition);
+            ast_node_free(true_expr);
+            return NULL;
+        }
+        
+        /* Create conditional expression node */
+        ASTNode *cond_node = ast_node_new(NODE_CONDITIONAL, parser_current_line(parser), parser_current_column(parser));
+        if (!cond_node) {
+            ast_node_free(condition);
+            ast_node_free(true_expr);
+            ast_node_free(false_expr);
+            return NULL;
+        }
+        
+        cond_node->data.conditional.condition = condition;
+        cond_node->data.conditional.true_expr = true_expr;
+        cond_node->data.conditional.false_expr = false_expr;
+        
+        return cond_node;
+    }
+    
+    return condition;
+}
 ASTNode* parse_logical_or_expression(ParserState *parser) {
     if (!parser) return NULL;
     
-    /* Parse logical AND expressions first */
-    ASTNode *left = parse_logical_and_expression(parser);
-    if (!left) return NULL;
+    printf("DEBUG: parse_logical_or_expression - starting, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse logical XOR expressions first */
+    ASTNode *left = parse_logical_xor_expression(parser);
+    if (!left) {
+        printf("DEBUG: parse_logical_or_expression - failed to parse logical XOR expression\n");
+        return NULL;
+    }
+    
+    printf("DEBUG: parse_logical_or_expression - parsed logical XOR expression, current token: %d\n", parser_current_token(parser));
     
     /* Parse logical OR operators (||) */
     while (parser_current_token(parser) == TK_OR_OR) {
         parser_next_token(parser); /* Consume || */
         
-        ASTNode *right = parse_logical_and_expression(parser);
+        ASTNode *right = parse_logical_xor_expression(parser);
         if (!right) {
             ast_node_free(left);
             return NULL;
@@ -1333,8 +2670,8 @@ ASTNode* parse_logical_or_expression(ParserState *parser) {
 ASTNode* parse_logical_and_expression(ParserState *parser) {
     if (!parser) return NULL;
     
-    /* Parse equality expressions first */
-    ASTNode *left = parse_equality_expression(parser);
+    /* Parse bitwise OR expressions first */
+    ASTNode *left = parse_bitwise_or_expression(parser);
     if (!left) return NULL;
     
     /* Parse logical AND operators (&&) */
@@ -1364,9 +2701,153 @@ ASTNode* parse_logical_and_expression(ParserState *parser) {
     
     return left;
 }
-ASTNode* parse_bitwise_or_expression(ParserState *parser) { return NULL; }
-ASTNode* parse_bitwise_xor_expression(ParserState *parser) { return NULL; }
-ASTNode* parse_bitwise_and_expression(ParserState *parser) { return NULL; }
+
+ASTNode* parse_logical_xor_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: parse_logical_xor_expression - starting, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse logical AND expressions first */
+    ASTNode *left = parse_logical_and_expression(parser);
+    if (!left) {
+        printf("DEBUG: parse_logical_xor_expression - failed to parse logical AND expression\n");
+        return NULL;
+    }
+    
+    printf("DEBUG: parse_logical_xor_expression - parsed logical AND expression, current token: %d\n", parser_current_token(parser));
+    
+    /* Parse logical XOR operators (^^) */
+    while (parser_current_token(parser) == TK_XOR_XOR) {
+        parser_next_token(parser); /* Consume ^^ */
+        
+        ASTNode *right = parse_logical_and_expression(parser);
+        if (!right) {
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        /* Create binary operation node */
+        ASTNode *binop = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!binop) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        binop->data.binary_op.op = BINOP_XOR_XOR;
+        binop->data.binary_op.left = left;
+        binop->data.binary_op.right = right;
+        
+        left = binop;
+    }
+    
+    return left;
+}
+
+ASTNode* parse_bitwise_or_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    /* Parse bitwise XOR expressions first */
+    ASTNode *left = parse_bitwise_xor_expression(parser);
+    if (!left) return NULL;
+    
+    /* Parse bitwise OR operators (|) */
+    while (parser_current_token(parser) == '|') {
+        parser_next_token(parser); /* Consume | */
+        
+        ASTNode *right = parse_bitwise_xor_expression(parser);
+        if (!right) {
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        /* Create binary operation node */
+        ASTNode *binop = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!binop) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        binop->data.binary_op.op = BINOP_OR;
+        binop->data.binary_op.left = left;
+        binop->data.binary_op.right = right;
+        
+        left = binop;
+    }
+    
+    return left;
+}
+
+ASTNode* parse_bitwise_xor_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    /* Parse bitwise AND expressions first */
+    ASTNode *left = parse_bitwise_and_expression(parser);
+    if (!left) return NULL;
+    
+    /* Parse bitwise XOR operators (^) */
+    while (parser_current_token(parser) == '^') {
+        parser_next_token(parser); /* Consume ^ */
+        
+        ASTNode *right = parse_bitwise_and_expression(parser);
+        if (!right) {
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        /* Create binary operation node */
+        ASTNode *binop = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!binop) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        binop->data.binary_op.op = BINOP_XOR;
+        binop->data.binary_op.left = left;
+        binop->data.binary_op.right = right;
+        
+        left = binop;
+    }
+    
+    return left;
+}
+
+ASTNode* parse_bitwise_and_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    /* Parse equality expressions first */
+    ASTNode *left = parse_equality_expression(parser);
+    if (!left) return NULL;
+    
+    /* Parse bitwise AND operators (&) */
+    while (parser_current_token(parser) == '&') {
+        parser_next_token(parser); /* Consume & */
+        
+        ASTNode *right = parse_equality_expression(parser);
+        if (!right) {
+            ast_node_free(left);
+            return NULL;
+        }
+        
+        /* Create binary operation node */
+        ASTNode *binop = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!binop) {
+            ast_node_free(left);
+            ast_node_free(right);
+            return NULL;
+        }
+        
+        binop->data.binary_op.op = BINOP_AND;
+        binop->data.binary_op.left = left;
+        binop->data.binary_op.right = right;
+        
+        left = binop;
+    }
+    
+    return left;
+}
 ASTNode* parse_equality_expression(ParserState *parser) {
     if (!parser) return NULL;
     
@@ -1376,7 +2857,7 @@ ASTNode* parse_equality_expression(ParserState *parser) {
     
     /* Parse equality operators (==, !=) */
     while (parser_current_token(parser) == TK_EQU_EQU || parser_current_token(parser) == TK_NOT_EQU) {
-        TokenType op = parser_current_token(parser);
+        SchismTokenType op = parser_current_token(parser);
         parser_next_token(parser); /* Consume operator */
         
         ASTNode *right = parse_relational_expression(parser);
@@ -1411,14 +2892,43 @@ ASTNode* parse_equality_expression(ParserState *parser) {
 ASTNode* parse_relational_expression(ParserState *parser) {
     if (!parser) return NULL;
     
+    printf("DEBUG: parse_relational_expression - starting, current token: %d\n", parser_current_token(parser));
+    
     /* Parse shift expressions first */
     ASTNode *left = parse_shift_expression(parser);
     if (!left) return NULL;
     
-    /* Parse relational operators (<, >, <=, >=) */
+    /* Check if this is a range comparison (multiple consecutive comparison operators) */
+    if (parser_current_token(parser) == '<' || parser_current_token(parser) == '>' ||
+        parser_current_token(parser) == TK_LESS_EQU || parser_current_token(parser) == TK_GREATER_EQU) {
+        
+        /* Check if the next token after the comparison is also a comparison operator */
+        /* This indicates a range comparison like 5<i<j+1<20 */
+        parser_save_position(parser);
+        SchismTokenType first_op = parser_current_token(parser);
+        parser_next_token(parser); /* consume first comparison operator */
+        
+        /* Parse the next expression */
+        ASTNode *second_expr = parse_shift_expression(parser);
+        if (second_expr) {
+            /* Check if there's another comparison operator */
+            if (parser_current_token(parser) == '<' || parser_current_token(parser) == '>' ||
+                parser_current_token(parser) == TK_LESS_EQU || parser_current_token(parser) == TK_GREATER_EQU) {
+                
+                /* This is a range comparison! Parse the entire range */
+                parser_restore_position(parser);
+                return parse_range_comparison(parser, left);
+            }
+        }
+        
+        /* Not a range comparison, restore position and continue with normal parsing */
+        parser_restore_position(parser);
+    }
+    
+    /* Parse relational operators (<, >, <=, >=) - normal single comparison */
     while (parser_current_token(parser) == '<' || parser_current_token(parser) == '>' ||
            parser_current_token(parser) == TK_LESS_EQU || parser_current_token(parser) == TK_GREATER_EQU) {
-        TokenType op = parser_current_token(parser);
+        SchismTokenType op = parser_current_token(parser);
         parser_next_token(parser); /* Consume operator */
         
         ASTNode *right = parse_shift_expression(parser);
@@ -1461,7 +2971,7 @@ ASTNode* parse_shift_expression(ParserState *parser) {
     
     /* Parse shift operators (<<, >>) */
     while (parser_current_token(parser) == TK_SHL || parser_current_token(parser) == TK_SHR) {
-        TokenType op = parser_current_token(parser);
+        SchismTokenType op = parser_current_token(parser);
         parser_next_token(parser); /* Consume operator */
         
         ASTNode *right = parse_additive_expression(parser);
@@ -1497,7 +3007,7 @@ ASTNode* parse_shift_expression(ParserState *parser) {
 ASTNode* parse_unary_expression(ParserState *parser) {
     if (!parser) return NULL;
     
-    TokenType current = parser_current_token(parser);
+    SchismTokenType current = parser_current_token(parser);
     I64 line = parser_current_line(parser);
     I64 column = parser_current_column(parser);
     
@@ -1700,6 +3210,24 @@ ASTNode* parse_parameter_list(ParserState *parser) {
             continue;
         }
         
+        /* Check for variable arguments (...) */
+        if (parser_current_token(parser) == TK_ELLIPSIS) {
+            printf("DEBUG: Found variable arguments (...)\n");
+            parser_next_token(parser); /* consume '...' */
+            
+            /* Create variable arguments node */
+            ASTNode *varargs_node = ast_node_new(NODE_VARARGS, parser_current_line(parser), parser_current_column(parser));
+            if (varargs_node) {
+                varargs_node->data.varargs.type = (U8*)"...";
+                varargs_node->data.varargs.arg_index = param_count;
+                varargs_node->data.varargs.is_va_list = true;
+                
+                /* Add to parameter list */
+                ast_node_add_child(param_list, varargs_node);
+            }
+            break; /* Variable arguments must be the last parameter */
+        }
+        
         /* Parse parameter type */
         ASTNode *param_type = parse_type_specifier(parser);
         if (!param_type) {
@@ -1718,6 +3246,17 @@ ASTNode* parse_parameter_list(ParserState *parser) {
         printf("DEBUG: Parsed parameter: %s\n", param_name ? (char*)param_name : "NULL");
         parser_next_token(parser);
         
+        /* Check for default argument value */
+        ASTNode *default_value = NULL;
+        if (parser_current_token(parser) == '=') {
+            printf("DEBUG: Found default argument value\n");
+            parser_next_token(parser); /* consume '=' */
+            default_value = parse_expression(parser);
+            if (!default_value) {
+                printf("DEBUG: Failed to parse default argument value\n");
+            }
+        }
+        
         /* Create parameter variable node */
         ASTNode *param_var = ast_node_new(NODE_VARIABLE, parser_current_line(parser), parser_current_column(parser));
         if (param_var) {
@@ -1730,6 +3269,19 @@ ASTNode* parse_parameter_list(ParserState *parser) {
             if (!scope_add_variable(parser_get_current_scope(parser), param_var)) {
                 printf("WARNING: Failed to add parameter to scope\n");
             }
+        }
+        
+        /* Create default argument node if we have a default value */
+        if (default_value) {
+            ASTNode *default_arg_node = ast_node_new(NODE_DEFAULT_ARG, parser_current_line(parser), parser_current_column(parser));
+            if (default_arg_node) {
+                default_arg_node->data.default_arg.parameter = param_var;
+                default_arg_node->data.default_arg.default_value = default_value;
+                ast_node_add_child(param_list, default_arg_node);
+            }
+        } else {
+            /* Add regular parameter to list */
+            ast_node_add_child(param_list, param_var);
         }
         
         param_count++;
@@ -1745,6 +3297,27 @@ ASTNode* parse_parameter_list(ParserState *parser) {
     
     /* Parsed %ld parameters */
     return param_list;
+}
+
+/* Parse variable arguments (...) */
+ASTNode* parse_variable_arguments(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    if (parser_current_token(parser) != TK_ELLIPSIS) {
+        return NULL;
+    }
+    
+    printf("DEBUG: Parsing variable arguments (...)\n");
+    parser_next_token(parser); /* consume '...' */
+    
+    ASTNode *varargs_node = ast_node_new(NODE_VARARGS, parser_current_line(parser), parser_current_column(parser));
+    if (!varargs_node) return NULL;
+    
+    varargs_node->data.varargs.type = (U8*)"...";
+    varargs_node->data.varargs.arg_index = 0; /* Will be set by caller */
+    varargs_node->data.varargs.is_va_list = true;
+    
+    return varargs_node;
 }
 ASTNode* parse_argument_list(ParserState *parser) {
     if (!parser) return NULL;
@@ -1816,7 +3389,7 @@ ASTNode* parse_argument_list(ParserState *parser) {
 ASTNode* parse_type_specifier(ParserState *parser) {
     if (!parser) return NULL;
     
-    TokenType current = parser_current_token(parser);
+    SchismTokenType current = parser_current_token(parser);
     
     /* Check for type tokens */
     if (current >= TK_TYPE_I0 && current <= TK_TYPE_STRING) {
@@ -1829,6 +3402,13 @@ ASTNode* parse_type_specifier(ParserState *parser) {
         /* Move to next token */
         parser_next_token(parser);
         
+        /* Check for pointer type (*) */
+        while (parser_current_token(parser) == '*') {
+            parser_next_token(parser); /* consume '*' */
+            /* Mark as pointer type - we'll handle this in the type system */
+            type_node->data.type_specifier.is_pointer = true;
+        }
+        
         return type_node;
     }
     
@@ -1836,6 +3416,320 @@ ASTNode* parse_type_specifier(ParserState *parser) {
     return NULL;
 }
 ASTNode* parse_assembly_block(ParserState *parser) { return NULL; }
+
+/* Parse inline assembly block: asm { ... } */
+ASTNode* parse_inline_assembly_block(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing inline assembly block\n");
+    
+    /* Expect opening brace */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after asm");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '{' */
+    
+    ASTNode *asm_node = ast_node_new(NODE_INLINE_ASM, parser_current_line(parser), parser_current_column(parser));
+    if (!asm_node) return NULL;
+    
+    /* Initialize inline assembly data */
+    asm_node->data.inline_asm.instructions = NULL;
+    asm_node->data.inline_asm.is_volatile = false;
+    asm_node->data.inline_asm.input_count = 0;
+    asm_node->data.inline_asm.output_count = 0;
+    asm_node->data.inline_asm.clobber_count = 0;
+    asm_node->data.inline_asm.input_ops = NULL;
+    asm_node->data.inline_asm.output_ops = NULL;
+    asm_node->data.inline_asm.clobber_ops = NULL;
+    
+    /* Parse assembly instructions until closing brace */
+    while (parser_current_token(parser) != '}' && parser_current_token(parser) != TK_EOF) {
+        /* For now, just skip tokens until we find the closing brace */
+        /* TODO: Implement proper assembly instruction parsing */
+        parser_next_token(parser);
+    }
+    
+    if (parser_current_token(parser) == '}') {
+        parser_next_token(parser); /* consume '}' */
+    }
+    
+    printf("DEBUG: Completed inline assembly block parsing\n");
+    return asm_node;
+}
+
+/* Parse register directive: reg/noreg */
+ASTNode* parse_register_directive(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    SchismTokenType current = parser_current_token(parser);
+    printf("DEBUG: Parsing register directive: %s\n", (current == TK_REG) ? "reg" : "noreg");
+    
+    ASTNode *reg_node = ast_node_new(NODE_REG_DIRECTIVE, parser_current_line(parser), parser_current_column(parser));
+    if (!reg_node) return NULL;
+    
+    reg_node->data.reg_directive.is_reg = (current == TK_REG);
+    reg_node->data.reg_directive.function_name = NULL; /* Will be set by caller if needed */
+    
+    parser_next_token(parser); /* consume reg/noreg */
+    
+    return reg_node;
+}
+
+/* Parse try block: try { ... } catch (type name) { ... } */
+ASTNode* parse_try_block(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing try block\n");
+    
+    if (parser_current_token(parser) != TK_TRY) {
+        parser_error(parser, (U8*)"Expected 'try'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'try' */
+    
+    ASTNode *try_node = ast_node_new(NODE_TRY_BLOCK, parser_current_line(parser), parser_current_column(parser));
+    if (!try_node) return NULL;
+    
+    /* Parse try body */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after try");
+        ast_node_free(try_node);
+        return NULL;
+    }
+    try_node->data.try_block.try_body = parse_block_statement(parser);
+    
+    /* Initialize catch blocks */
+    try_node->data.try_block.catch_blocks = NULL;
+    try_node->data.try_block.catch_count = 0;
+    
+    /* Parse catch blocks */
+    while (parser_current_token(parser) == TK_CATCH) {
+        ASTNode *catch_block = parse_catch_block(parser);
+        if (catch_block) {
+            ast_node_add_child(try_node, catch_block);
+            try_node->data.try_block.catch_count++;
+        }
+    }
+    
+    return try_node;
+}
+
+/* Parse catch block: catch (type name) { ... } */
+ASTNode* parse_catch_block(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing catch block\n");
+    
+    if (parser_current_token(parser) != TK_CATCH) {
+        parser_error(parser, (U8*)"Expected 'catch'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'catch' */
+    
+    ASTNode *catch_node = ast_node_new(NODE_CATCH_BLOCK, parser_current_line(parser), parser_current_column(parser));
+    if (!catch_node) return NULL;
+    
+    /* Parse exception type and name */
+    if (parser_current_token(parser) != '(') {
+        parser_error(parser, (U8*)"Expected '(' after catch");
+        ast_node_free(catch_node);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '(' */
+    
+    /* Parse exception type */
+    ASTNode *exception_type_node = parse_type_specifier(parser);
+    if (!exception_type_node) {
+        parser_error(parser, (U8*)"Expected exception type");
+        ast_node_free(catch_node);
+        return NULL;
+    }
+    catch_node->data.catch_block.exception_type = (U8*)exception_type_node->data.type_specifier.type_name;
+    
+    /* Parse exception name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected exception variable name");
+        ast_node_free(catch_node);
+        ast_node_free(exception_type_node);
+        return NULL;
+    }
+    catch_node->data.catch_block.exception_name = parser_current_token_value(parser);
+    parser_next_token(parser);
+    
+    if (parser_current_token(parser) != ')') {
+        parser_error(parser, (U8*)"Expected ')' after exception name");
+        ast_node_free(catch_node);
+        ast_node_free(exception_type_node);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ')' */
+    
+    /* Parse catch body */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after catch");
+        ast_node_free(catch_node);
+        ast_node_free(exception_type_node);
+        return NULL;
+    }
+    catch_node->data.catch_block.catch_body = parse_block_statement(parser);
+    
+    ast_node_free(exception_type_node);
+    return catch_node;
+}
+
+/* Parse throw statement: throw expression; */
+ASTNode* parse_throw_statement(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing throw statement\n");
+    
+    if (parser_current_token(parser) != TK_THROW) {
+        parser_error(parser, (U8*)"Expected 'throw'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'throw' */
+    
+    ASTNode *throw_node = ast_node_new(NODE_THROW_STMT, parser_current_line(parser), parser_current_column(parser));
+    if (!throw_node) return NULL;
+    
+    /* Parse exception expression */
+    throw_node->data.throw_stmt.exception = parse_expression(parser);
+    if (!throw_node->data.throw_stmt.exception) {
+        parser_error(parser, (U8*)"Expected exception expression");
+        ast_node_free(throw_node);
+        return NULL;
+    }
+    
+    throw_node->data.throw_stmt.exception_type = (U8*)"Exception"; /* Default exception type */
+    
+    return throw_node;
+}
+
+/* Parse type inference: auto variable = expression; */
+ASTNode* parse_type_inference(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing type inference (auto)\n");
+    
+    if (parser_current_token(parser) != TK_AUTO) {
+        parser_error(parser, (U8*)"Expected 'auto'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'auto' */
+    
+    /* Parse variable name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected variable name after 'auto'");
+        return NULL;
+    }
+    
+    U8 *var_name = parser_current_token_value(parser);
+    parser_next_token(parser); /* consume variable name */
+    
+    /* Expect assignment operator */
+    if (parser_current_token(parser) != '=') {
+        parser_error(parser, (U8*)"Expected '=' after auto variable name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '=' */
+    
+    /* Parse initializer expression */
+    ASTNode *initializer = parse_expression(parser);
+    if (!initializer) {
+        parser_error(parser, (U8*)"Expected initializer expression");
+        return NULL;
+    }
+    
+    /* Create type inference node */
+    ASTNode *inference_node = ast_node_new(NODE_TYPE_INFERENCE, parser_current_line(parser), parser_current_column(parser));
+    if (!inference_node) {
+        ast_node_free(initializer);
+        return NULL;
+    }
+    
+    inference_node->data.type_inference.expression = initializer;
+    inference_node->data.type_inference.inferred_type = (U8*)"auto"; /* Will be determined later */
+    inference_node->data.type_inference.is_auto = true;
+    
+    /* Create variable declaration node */
+    ASTNode *var_node = ast_node_new(NODE_VARIABLE, parser_current_line(parser), parser_current_column(parser));
+    if (var_node) {
+        var_node->data.variable.name = var_name;
+        var_node->data.variable.type = (U8*)"auto";
+        var_node->data.variable.initializer = initializer;
+        var_node->data.variable.is_parameter = false;
+        var_node->data.variable.is_global = false;
+        
+        /* Add variable to scope */
+        if (!scope_add_variable(parser_get_current_scope(parser), var_node)) {
+            printf("WARNING: Failed to add auto variable to scope\n");
+        }
+    }
+    
+    return var_node;
+}
+
+/* Parse enhanced type casting: (type)expression */
+ASTNode* parse_enhanced_type_cast(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing enhanced type cast\n");
+    
+    if (parser_current_token(parser) != '(') {
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '(' */
+    
+    /* Parse target type */
+    ASTNode *target_type_node = parse_type_specifier(parser);
+    if (!target_type_node) {
+        parser_error(parser, (U8*)"Expected type in cast");
+        return NULL;
+    }
+    
+    if (parser_current_token(parser) != ')') {
+        parser_error(parser, (U8*)"Expected ')' after type in cast");
+        ast_node_free(target_type_node);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ')' */
+    
+    /* Parse expression to cast */
+    ASTNode *expression = parse_expression(parser);
+    if (!expression) {
+        parser_error(parser, (U8*)"Expected expression after cast");
+        ast_node_free(target_type_node);
+        return NULL;
+    }
+    
+    /* Create enhanced cast node */
+    ASTNode *cast_node = ast_node_new(NODE_ENHANCED_CAST, parser_current_line(parser), parser_current_column(parser));
+    if (!cast_node) {
+        ast_node_free(target_type_node);
+        ast_node_free(expression);
+        return NULL;
+    }
+    
+    cast_node->data.enhanced_cast.target_type = (U8*)target_type_node->data.type_specifier.type_name;
+    cast_node->data.enhanced_cast.expression = expression;
+    cast_node->data.enhanced_cast.is_explicit = true;
+    cast_node->data.enhanced_cast.is_const_cast = false;
+    cast_node->data.enhanced_cast.is_reinterpret_cast = false;
+    
+    ast_node_free(target_type_node);
+    return cast_node;
+}
+
+/* Check if a function is defined in the current scope */
+Bool parser_is_function_defined_in_scope(ParserState *parser, U8 *name) {
+    if (!parser || !name) return false;
+    
+    /* For now, just return false - this would need to be implemented */
+    /* with proper symbol table lookup */
+    return false;
+}
+
 ASTNode* parse_assembly_instruction(ParserState *parser) { return NULL; }
 ASTNode* parse_assembly_operand(ParserState *parser) { return NULL; }
 ASTNode* parse_assembly_register(ParserState *parser) { return NULL; }
@@ -1844,20 +3738,687 @@ ASTNode* parse_assembly_immediate(ParserState *parser) { return NULL; }
 ASTNode* parse_assembly_label(ParserState *parser) { return NULL; }
 ASTNode* parse_range_expression(ParserState *parser) { return NULL; }
 ASTNode* parse_dollar_expression(ParserState *parser) { return NULL; }
-ASTNode* parse_class_definition(ParserState *parser) { return NULL; }
+ASTNode* parse_class_definition(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing class definition, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    Bool is_public = false;
+    Bool is_union = false;
+    
+    /* Check for 'public' keyword */
+    if (parser_current_token(parser) == TK_PUBLIC) {
+        is_public = true;
+        parser_next_token(parser); /* consume 'public' */
+    }
+    
+    /* Check for 'class' or 'union' keyword */
+    if (parser_current_token(parser) == TK_CLASS) {
+        is_union = false;
+        parser_next_token(parser); /* consume 'class' */
+    } else if (parser_current_token(parser) == TK_UNION) {
+        is_union = true;
+        parser_next_token(parser); /* consume 'union' */
+    } else {
+        parser_error(parser, (U8*)"Expected 'class' or 'union' keyword");
+        return NULL;
+    }
+    
+    /* Parse class name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected class name");
+        return NULL;
+    }
+    
+    U8 *class_name = parser_current_token_value(parser);
+    if (!class_name) {
+        parser_error(parser, (U8*)"Failed to get class name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume class name */
+    
+    /* Check for inheritance */
+    U8 *base_class = NULL;
+    if (parser_current_token(parser) == ':') {
+        parser_next_token(parser); /* consume ':' */
+        
+        if (parser_current_token(parser) != TK_IDENT) {
+            parser_error(parser, (U8*)"Expected base class name");
+            return NULL;
+        }
+        
+        base_class = parser_current_token_value(parser);
+        if (!base_class) {
+            parser_error(parser, (U8*)"Failed to get base class name");
+            return NULL;
+        }
+        parser_next_token(parser); /* consume base class name */
+    }
+    
+    /* Expect opening brace */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after class name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '{' */
+    
+    /* Parse member declarations */
+    ASTNode *members = NULL;
+    I64 member_count = 0;
+    
+    while (parser_current_token(parser) != '}' && parser_current_token(parser) != 0) {
+        /* Parse member declaration (type + identifier) */
+        ASTNode *member_type = parse_type_specifier(parser);
+        if (!member_type) {
+            parser_error(parser, (U8*)"Expected member type");
+            break;
+        }
+        
+        /* Parse member name */
+        if (parser_current_token(parser) != TK_IDENT) {
+            parser_error(parser, (U8*)"Expected member name");
+            ast_node_free(member_type);
+            break;
+        }
+        
+        U8 *member_name = parser_current_token_value(parser);
+        if (!member_name) {
+            parser_error(parser, (U8*)"Failed to get member name");
+            ast_node_free(member_type);
+            break;
+        }
+        parser_next_token(parser); /* consume member name */
+        
+        /* Expect semicolon */
+        if (parser_current_token(parser) != ';') {
+            parser_error(parser, (U8*)"Expected ';' after member declaration");
+            ast_node_free(member_type);
+            break;
+        }
+        parser_next_token(parser); /* consume ';' */
+        
+        /* Create member node */
+        ASTNode *member_node = ast_node_new(NODE_VARIABLE, line, column);
+        if (member_node) {
+            member_node->data.variable.type = member_type;
+            member_node->data.variable.name = member_name;
+            
+            /* Add to members list */
+            if (!members) {
+                members = member_node;
+            } else {
+                /* Add to end of list */
+                ASTNode *current = members;
+                while (current->next) {
+                    current = current->next;
+                }
+                current->next = member_node;
+            }
+            member_count++;
+        }
+    }
+    
+    /* Expect closing brace */
+    if (parser_current_token(parser) != '}') {
+        parser_error(parser, (U8*)"Expected '}' after class members");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '}' */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after class definition");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create class definition node */
+    ASTNode *class_node = ast_node_new(NODE_CLASS_DEF, line, column);
+    if (!class_node) {
+        return NULL;
+    }
+    
+    /* Initialize class definition data */
+    class_node->data.class_def.class_name = class_name;
+    class_node->data.class_def.base_class = base_class;
+    class_node->data.class_def.members = members;
+    class_node->data.class_def.member_count = member_count;
+    class_node->data.class_def.is_public = is_public;
+    class_node->data.class_def.is_union = is_union;
+    
+    printf("DEBUG: Class definition parsed successfully, name: %s, members: %ld, public: %s, union: %s\n", 
+           class_name, member_count, is_public ? "true" : "false", is_union ? "true" : "false");
+    return class_node;
+}
 ASTNode* parse_union_definition(ParserState *parser) { return NULL; }
 ASTNode* parse_public_declaration(ParserState *parser) { return NULL; }
 ASTNode* parse_extern_declaration(ParserState *parser) { return NULL; }
 ASTNode* parse_import_declaration(ParserState *parser) { return NULL; }
 ASTNode* parse_try_catch_block(ParserState *parser) { return NULL; }
-ASTNode* parse_throw_statement(ParserState *parser) { return NULL; }
 ASTNode* parse_type_declaration(ParserState *parser) { return NULL; }
 ASTNode* parse_type_cast(ParserState *parser) { return NULL; }
 ASTNode* parse_type_reference(ParserState *parser) { return NULL; }
 ASTNode* parse_type_dereference(ParserState *parser) { return NULL; }
-ASTNode* parse_array_access(ParserState *parser) { return NULL; }
-ASTNode* parse_member_access(ParserState *parser) { return NULL; }
+ASTNode* parse_array_access(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing array access, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect '[' */
+    if (parser_current_token(parser) != '[') {
+        parser_error(parser, (U8*)"Expected '[' for array access");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '[' */
+    
+    /* Parse index expression */
+    ASTNode *index = parse_expression(parser);
+    if (!index) {
+        parser_error(parser, (U8*)"Expected index expression in array access");
+        return NULL;
+    }
+    
+    /* Expect ']' */
+    if (parser_current_token(parser) != ']') {
+        parser_error(parser, (U8*)"Expected ']' after array index");
+        ast_node_free(index);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ']' */
+    
+    /* Create array access node */
+    ASTNode *array_access = ast_node_new(NODE_ARRAY_ACCESS, line, column);
+    if (!array_access) {
+        ast_node_free(index);
+        return NULL;
+    }
+    
+    /* Initialize array access data */
+    array_access->data.array_access.array = NULL; /* Will be set by caller */
+    array_access->data.array_access.index = index;
+    
+    printf("DEBUG: Array access parsed successfully\n");
+    return array_access;
+}
+ASTNode* parse_member_access(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing member access, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect '.' or '->' */
+    if (parser_current_token(parser) != '.' && parser_current_token(parser) != TK_DEREFERENCE) {
+        parser_error(parser, (U8*)"Expected '.' or '->' for member access");
+        return NULL;
+    }
+    
+    Bool is_arrow = (parser_current_token(parser) == TK_DEREFERENCE);
+    parser_next_token(parser); /* consume '.' or '->' */
+    
+    /* Parse member name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected member name after '.' or '->'");
+        return NULL;
+    }
+    
+    U8 *member_name = parser_current_token_value(parser);
+    if (!member_name) {
+        parser_error(parser, (U8*)"Failed to get member name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume member name */
+    
+    /* Create member access node */
+    ASTNode *member_node = ast_node_new(NODE_MEMBER_ACCESS, line, column);
+    if (!member_node) {
+        return NULL;
+    }
+    
+    /* Initialize member access data */
+    member_node->data.member_access.object = NULL; /* Will be set by caller */
+    member_node->data.member_access.member_name = member_name;
+    
+    printf("DEBUG: Member access parsed successfully, member: %s, arrow: %s\n", 
+           member_name, is_arrow ? "true" : "false");
+    return member_node;
+}
 ASTNode* parse_pointer_arithmetic(ParserState *parser) { return NULL; }
+
+/* Sub-int access parsing functions */
+
+/* Check if current token pattern matches sub-int access (identifier.type[expr]) */
+Bool is_sub_int_access_pattern(ParserState *parser) {
+    if (!parser) return false;
+    
+    /* Save current position */
+    parser_save_position(parser);
+    
+    /* Check pattern: identifier . type [ expression ] */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_restore_position(parser);
+        return false;
+    }
+    parser_next_token(parser); /* consume identifier */
+    
+    if (parser_current_token(parser) != '.') {
+        parser_restore_position(parser);
+        return false;
+    }
+    parser_next_token(parser); /* consume '.' */
+    
+    /* Check if next token is a type identifier */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_restore_position(parser);
+        return false;
+    }
+    
+    U8 *type_name = parser_current_token_value(parser);
+    if (!type_name) {
+        parser_restore_position(parser);
+        return false;
+    }
+    
+    /* Check if it's a valid sub-int type (i8, u8, i16, u16, i32, u32) */
+    if (strcmp(type_name, "i8") != 0 && strcmp(type_name, "u8") != 0 &&
+        strcmp(type_name, "i16") != 0 && strcmp(type_name, "u16") != 0 &&
+        strcmp(type_name, "i32") != 0 && strcmp(type_name, "u32") != 0) {
+        parser_restore_position(parser);
+        return false;
+    }
+    parser_next_token(parser); /* consume type */
+    
+    if (parser_current_token(parser) != '[') {
+        parser_restore_position(parser);
+        return false;
+    }
+    
+    /* Restore position and return true */
+    parser_restore_position(parser);
+    return true;
+}
+
+/* Parse sub-int access expression (i.u16[1]) */
+ASTNode* parse_sub_int_access(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing sub-int access, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Parse base object (identifier) */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected identifier for sub-int access");
+        return NULL;
+    }
+    
+    U8 *object_name = parser_current_token_value(parser);
+    if (!object_name) {
+        parser_error(parser, (U8*)"Failed to get object name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume identifier */
+    
+    /* Create base object node */
+    ASTNode *base_object = ast_node_new(NODE_IDENTIFIER, line, column);
+    if (!base_object) {
+        parser_error(parser, (U8*)"Failed to create base object node");
+        return NULL;
+    }
+    base_object->data.identifier.name = strdup(object_name);
+    
+    /* Expect '.' */
+    if (parser_current_token(parser) != '.') {
+        parser_error(parser, (U8*)"Expected '.' after object name");
+        ast_node_free(base_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '.' */
+    
+    /* Parse member type */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected member type after '.'");
+        ast_node_free(base_object);
+        return NULL;
+    }
+    
+    U8 *member_type = parser_current_token_value(parser);
+    if (!member_type) {
+        parser_error(parser, (U8*)"Failed to get member type");
+        ast_node_free(base_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume member type */
+    
+    /* Expect '[' */
+    if (parser_current_token(parser) != '[') {
+        parser_error(parser, (U8*)"Expected '[' after member type");
+        ast_node_free(base_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '[' */
+    
+    /* Parse index expression */
+    ASTNode *index = parse_expression(parser);
+    if (!index) {
+        parser_error(parser, (U8*)"Expected index expression in sub-int access");
+        ast_node_free(base_object);
+        return NULL;
+    }
+    
+    /* Expect ']' */
+    if (parser_current_token(parser) != ']') {
+        parser_error(parser, (U8*)"Expected ']' after index expression");
+        ast_node_free(base_object);
+        ast_node_free(index);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ']' */
+    
+    /* Create sub-int access node */
+    ASTNode *sub_int_node = ast_node_new(NODE_SUB_INT_ACCESS, line, column);
+    if (!sub_int_node) {
+        ast_node_free(base_object);
+        ast_node_free(index);
+        return NULL;
+    }
+    
+    /* Initialize sub-int access data */
+    sub_int_node->data.sub_int_access.base_object = base_object;
+    sub_int_node->data.sub_int_access.member_type = strdup(member_type);
+    sub_int_node->data.sub_int_access.index = index;
+    
+    /* Calculate member size and properties */
+    if (strcmp(member_type, "i8") == 0 || strcmp(member_type, "u8") == 0) {
+        sub_int_node->data.sub_int_access.member_size = 1;
+        sub_int_node->data.sub_int_access.is_signed = (strcmp(member_type, "i8") == 0);
+    } else if (strcmp(member_type, "i16") == 0 || strcmp(member_type, "u16") == 0) {
+        sub_int_node->data.sub_int_access.member_size = 2;
+        sub_int_node->data.sub_int_access.is_signed = (strcmp(member_type, "i16") == 0);
+    } else if (strcmp(member_type, "i32") == 0 || strcmp(member_type, "u32") == 0) {
+        sub_int_node->data.sub_int_access.member_size = 4;
+        sub_int_node->data.sub_int_access.is_signed = (strcmp(member_type, "i32") == 0);
+    } else {
+        parser_error(parser, (U8*)"Invalid member type for sub-int access");
+        ast_node_free(base_object);
+        ast_node_free(index);
+        ast_node_free(sub_int_node);
+        return NULL;
+    }
+    
+    /* Calculate member offset (will be calculated at runtime based on index) */
+    sub_int_node->data.sub_int_access.member_offset = 0;
+    
+    printf("DEBUG: Sub-int access parsed successfully: %s.%s[expr], size: %lld, signed: %s\n", 
+           object_name, member_type, sub_int_node->data.sub_int_access.member_size,
+           sub_int_node->data.sub_int_access.is_signed ? "true" : "false");
+    
+    return sub_int_node;
+}
+
+/* Parse union member access with array notation */
+ASTNode* parse_union_member_access(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing union member access, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Parse union object */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected union object identifier");
+        return NULL;
+    }
+    
+    U8 *union_name = parser_current_token_value(parser);
+    if (!union_name) {
+        parser_error(parser, (U8*)"Failed to get union object name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume union name */
+    
+    /* Create union object node */
+    ASTNode *union_object = ast_node_new(NODE_IDENTIFIER, line, column);
+    if (!union_object) {
+        parser_error(parser, (U8*)"Failed to create union object node");
+        return NULL;
+    }
+    union_object->data.identifier.name = strdup(union_name);
+    
+    /* Expect '.' */
+    if (parser_current_token(parser) != '.') {
+        parser_error(parser, (U8*)"Expected '.' after union object");
+        ast_node_free(union_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '.' */
+    
+    /* Parse member name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected member name after '.'");
+        ast_node_free(union_object);
+        return NULL;
+    }
+    
+    U8 *member_name = parser_current_token_value(parser);
+    if (!member_name) {
+        parser_error(parser, (U8*)"Failed to get member name");
+        ast_node_free(union_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume member name */
+    
+    /* Expect '[' */
+    if (parser_current_token(parser) != '[') {
+        parser_error(parser, (U8*)"Expected '[' after member name");
+        ast_node_free(union_object);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '[' */
+    
+    /* Parse index expression */
+    ASTNode *index = parse_expression(parser);
+    if (!index) {
+        parser_error(parser, (U8*)"Expected index expression in union member access");
+        ast_node_free(union_object);
+        return NULL;
+    }
+    
+    /* Expect ']' */
+    if (parser_current_token(parser) != ']') {
+        parser_error(parser, (U8*)"Expected ']' after index expression");
+        ast_node_free(union_object);
+        ast_node_free(index);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ']' */
+    
+    /* Create union member access node */
+    ASTNode *union_member_node = ast_node_new(NODE_UNION_MEMBER_ACCESS, line, column);
+    if (!union_member_node) {
+        ast_node_free(union_object);
+        ast_node_free(index);
+        return NULL;
+    }
+    
+    /* Initialize union member access data */
+    union_member_node->data.union_member_access.union_object = union_object;
+    union_member_node->data.union_member_access.member_name = strdup(member_name);
+    union_member_node->data.union_member_access.index = index;
+    union_member_node->data.union_member_access.member_size = 0; /* Will be determined by type checking */
+    union_member_node->data.union_member_access.member_offset = 0; /* Will be calculated */
+    
+    printf("DEBUG: Union member access parsed successfully: %s.%s[expr]\n", 
+           union_name, member_name);
+    
+    return union_member_node;
+}
+
+/* Parse type-prefixed union declaration (public I64i union I64) */
+ASTNode* parse_type_prefixed_union(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing type-prefixed union, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    Bool is_public = false;
+    
+    /* Check for 'public' keyword */
+    if (parser_current_token(parser) == TK_PUBLIC) {
+        is_public = true;
+        parser_next_token(parser); /* consume 'public' */
+    }
+    
+    /* Parse prefix type (e.g., I64i) */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected prefix type for type-prefixed union");
+        return NULL;
+    }
+    
+    U8 *prefix_type = parser_current_token_value(parser);
+    if (!prefix_type) {
+        parser_error(parser, (U8*)"Failed to get prefix type");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume prefix type */
+    
+    /* Expect 'union' keyword */
+    if (parser_current_token(parser) != TK_UNION) {
+        parser_error(parser, (U8*)"Expected 'union' keyword after prefix type");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'union' */
+    
+    /* Parse union name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected union name");
+        return NULL;
+    }
+    
+    U8 *union_name = parser_current_token_value(parser);
+    if (!union_name) {
+        parser_error(parser, (U8*)"Failed to get union name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume union name */
+    
+    /* Expect opening brace */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' after union name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '{' */
+    
+    /* Parse union members */
+    ASTNode *members = NULL;
+    I64 member_count = 0;
+    
+    while (parser_current_token(parser) != '}' && parser_current_token(parser) != TK_EOF) {
+        /* Parse member declaration */
+        if (parser_current_token(parser) != TK_IDENT) {
+            parser_error(parser, (U8*)"Expected member type in union");
+            if (members) ast_node_free(members);
+            return NULL;
+        }
+        
+        U8 *member_type = parser_current_token_value(parser);
+        if (!member_type) {
+            parser_error(parser, (U8*)"Failed to get member type");
+            if (members) ast_node_free(members);
+            return NULL;
+        }
+        parser_next_token(parser); /* consume member type */
+        
+        /* Parse member name */
+        if (parser_current_token(parser) != TK_IDENT) {
+            parser_error(parser, (U8*)"Expected member name after type");
+            if (members) ast_node_free(members);
+            return NULL;
+        }
+        
+        U8 *member_name = parser_current_token_value(parser);
+        if (!member_name) {
+            parser_error(parser, (U8*)"Failed to get member name");
+            if (members) ast_node_free(members);
+            return NULL;
+        }
+        parser_next_token(parser); /* consume member name */
+        
+        /* Expect semicolon */
+        if (parser_current_token(parser) != ';') {
+            parser_error(parser, (U8*)"Expected ';' after member declaration");
+            if (members) ast_node_free(members);
+            return NULL;
+        }
+        parser_next_token(parser); /* consume ';' */
+        
+        /* Create member node */
+        ASTNode *member_node = ast_node_new(NODE_VARIABLE, line, column);
+        if (member_node) {
+            member_node->data.variable.type = (void*)member_type;
+            member_node->data.variable.name = strdup(member_name);
+            
+            /* Add to members list */
+            if (!members) {
+                members = member_node;
+            } else {
+                /* Add to end of list */
+                ASTNode *current = members;
+                while (current->next) {
+                    current = current->next;
+                }
+                current->next = member_node;
+            }
+            member_count++;
+        }
+    }
+    
+    /* Expect closing brace */
+    if (parser_current_token(parser) != '}') {
+        parser_error(parser, (U8*)"Expected '}' after union members");
+        if (members) ast_node_free(members);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '}' */
+    
+    /* Expect semicolon */
+    if (parser_current_token(parser) != ';') {
+        parser_error(parser, (U8*)"Expected ';' after union definition");
+        if (members) ast_node_free(members);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ';' */
+    
+    /* Create type-prefixed union node */
+    ASTNode *type_prefixed_union_node = ast_node_new(NODE_TYPE_PREFIXED_UNION, line, column);
+    if (!type_prefixed_union_node) {
+        if (members) ast_node_free(members);
+        return NULL;
+    }
+    
+    /* Initialize type-prefixed union data */
+    type_prefixed_union_node->data.type_prefixed_union.prefix_type = strdup(prefix_type);
+    type_prefixed_union_node->data.type_prefixed_union.union_name = strdup(union_name);
+    type_prefixed_union_node->data.type_prefixed_union.members = members;
+    type_prefixed_union_node->data.type_prefixed_union.member_count = member_count;
+    type_prefixed_union_node->data.type_prefixed_union.is_public = is_public;
+    
+    printf("DEBUG: Type-prefixed union parsed successfully: %s %s, members: %lld, public: %s\n", 
+           prefix_type, union_name, member_count, is_public ? "true" : "false");
+    
+    return type_prefixed_union_node;
+}
 
 void parser_warning(ParserState *parser, U8 *message) {
     if (!parser) return;
@@ -2154,27 +4715,27 @@ I64 parser_calculate_relative_address(ParserState *parser, I64 from_address, I64
     return relative_address;
 }
 
-Bool parser_is_assembly_token(TokenType token) {
+Bool parser_is_assembly_token(SchismTokenType token) {
     /* TODO: Implement assembly token checking */
     return false;
 }
 
-Bool parser_is_assembly_register_token(TokenType token) {
+Bool parser_is_assembly_register_token(SchismTokenType token) {
     /* TODO: Implement assembly register token checking */
     return false;
 }
 
-Bool parser_is_assembly_opcode_token(TokenType token) {
+Bool parser_is_assembly_opcode_token(SchismTokenType token) {
     /* TODO: Implement assembly opcode token checking */
     return false;
 }
 
-X86Register parser_get_assembly_register(TokenType token, U8 *name) {
+X86Register parser_get_assembly_register(SchismTokenType token, U8 *name) {
     /* TODO: Implement assembly register parsing */
-    return REG_NONE;
+    return X86_REG_NONE;
 }
 
-U8* parser_get_assembly_opcode(TokenType token, U8 *name) {
+U8* parser_get_assembly_opcode(SchismTokenType token, U8 *name) {
     /* TODO: Implement assembly opcode parsing */
     return NULL;
 }
@@ -2356,4 +4917,622 @@ ASTNode* parser_lookup_variable_in_scope(ParserState *parser, U8 *name) {
 
 Bool parser_is_variable_defined_in_scope(ParserState *parser, U8 *name) {
     return parser_lookup_variable_in_scope(parser, name) != NULL;
+}
+
+ASTNode* parse_case_statement(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing case statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'case' keyword */
+    if (parser_current_token(parser) != TK_CASE) {
+        parser_error(parser, (U8*)"Expected 'case' keyword");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'case' */
+    
+    /* Parse case value (optional - can be just 'case:') */
+    ASTNode *value = NULL;
+    ASTNode *range_start = NULL;
+    ASTNode *range_end = NULL;
+    Bool is_range = false;
+    Bool is_null_case = false;
+    I64 auto_increment_value = 0;
+    
+    if (parser_current_token(parser) != ':') {
+        /* Parse case value */
+        value = parse_expression(parser);
+        if (!value) {
+            parser_error(parser, (U8*)"Expected case value or ':'");
+            return NULL;
+        }
+        
+        /* Check for range expression (case 5...10:) */
+        if (parser_current_token(parser) == TK_ELLIPSIS) {
+            is_range = true;
+            range_start = value;
+            parser_next_token(parser); /* consume '...' */
+            
+            range_end = parse_expression(parser);
+            if (!range_end) {
+                parser_error(parser, (U8*)"Expected end value in range expression");
+                ast_node_free(range_start);
+                return NULL;
+            }
+        }
+    } else {
+        /* This is a null case (case:) - auto-increment from previous case */
+        is_null_case = true;
+        /* TODO: Calculate auto-increment value based on previous case */
+        /* For now, we'll set it to 0 and handle it in the switch statement */
+        auto_increment_value = 0;
+    }
+    
+    /* Expect ':' */
+    if (parser_current_token(parser) != ':') {
+        parser_error(parser, (U8*)"Expected ':' after case value");
+        if (value) ast_node_free(value);
+        if (range_start) ast_node_free(range_start);
+        if (range_end) ast_node_free(range_end);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ':' */
+    
+    /* Parse case body statements */
+    ASTNode *body = NULL;
+    ASTNode *last_stmt = NULL;
+    
+    /* Parse statements until we hit another case, default, or closing brace */
+    while (parser_current_token(parser) != TK_CASE && 
+           parser_current_token(parser) != TK_DEFAULT && 
+           parser_current_token(parser) != '}' && 
+           parser_current_token(parser) != TK_EOF) {
+        
+        ASTNode *stmt = parse_statement(parser);
+        if (!stmt) {
+            parser_error(parser, (U8*)"Failed to parse statement in case body");
+            if (body) ast_node_free(body);
+            if (value) ast_node_free(value);
+            if (range_start) ast_node_free(range_start);
+            if (range_end) ast_node_free(range_end);
+            return NULL;
+        }
+        
+        /* Add to body list */
+        if (!body) {
+            body = stmt;
+            last_stmt = stmt;
+        } else {
+            last_stmt->next = stmt;
+            last_stmt = stmt;
+        }
+    }
+    
+    /* Create case statement node */
+    ASTNode *case_node = ast_node_new(NODE_CASE, line, column);
+    if (!case_node) {
+        if (body) ast_node_free(body);
+        if (value) ast_node_free(value);
+        if (range_start) ast_node_free(range_start);
+        if (range_end) ast_node_free(range_end);
+        return NULL;
+    }
+    
+    /* Initialize case statement data */
+    case_node->data.case_stmt.value = value;
+    case_node->data.case_stmt.range_start = range_start;
+    case_node->data.case_stmt.range_end = range_end;
+    case_node->data.case_stmt.body = body;
+    case_node->data.case_stmt.is_range = is_range;
+    case_node->data.case_stmt.is_default = false;
+    case_node->data.case_stmt.is_null_case = is_null_case;
+    case_node->data.case_stmt.auto_increment_value = auto_increment_value;
+    
+    printf("DEBUG: Case statement parsed successfully\n");
+    return case_node;
+}
+
+ASTNode* parse_default_statement(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing default statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'default' keyword */
+    if (parser_current_token(parser) != TK_DEFAULT) {
+        parser_error(parser, (U8*)"Expected 'default' keyword");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'default' */
+    
+    /* Expect ':' */
+    if (parser_current_token(parser) != ':') {
+        parser_error(parser, (U8*)"Expected ':' after 'default'");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ':' */
+    
+    /* Parse default body statements */
+    ASTNode *body = NULL;
+    ASTNode *last_stmt = NULL;
+    
+    /* Parse statements until we hit another case, default, or closing brace */
+    while (parser_current_token(parser) != TK_CASE && 
+           parser_current_token(parser) != TK_DEFAULT && 
+           parser_current_token(parser) != '}' && 
+           parser_current_token(parser) != TK_EOF) {
+        
+        ASTNode *stmt = parse_statement(parser);
+        if (!stmt) {
+            parser_error(parser, (U8*)"Failed to parse statement in default body");
+            if (body) ast_node_free(body);
+            return NULL;
+        }
+        
+        /* Add to body list */
+        if (!body) {
+            body = stmt;
+            last_stmt = stmt;
+        } else {
+            last_stmt->next = stmt;
+            last_stmt = stmt;
+        }
+    }
+    
+    /* Create case statement node (default is just a special case) */
+    ASTNode *default_node = ast_node_new(NODE_CASE, line, column);
+    if (!default_node) {
+        if (body) ast_node_free(body);
+        return NULL;
+    }
+    
+    /* Initialize case statement data */
+    default_node->data.case_stmt.value = NULL;
+    default_node->data.case_stmt.range_start = NULL;
+    default_node->data.case_stmt.range_end = NULL;
+    default_node->data.case_stmt.body = body;
+    default_node->data.case_stmt.is_range = false;
+    default_node->data.case_stmt.is_default = true;
+    
+    printf("DEBUG: Default statement parsed successfully\n");
+    return default_node;
+}
+
+ASTNode* parse_label_statement(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing label statement, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Parse label name */
+    if (parser_current_token(parser) != TK_IDENT) {
+        parser_error(parser, (U8*)"Expected label name");
+        return NULL;
+    }
+    
+    U8 *label_name = parser_current_token_value(parser);
+    if (!label_name) {
+        parser_error(parser, (U8*)"Failed to get label name");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume label name */
+    
+    /* Check for exported label (label::) or local label (@@label:) */
+    Bool is_exported = false;
+    Bool is_local = false;
+    
+    if (parser_current_token(parser) == TK_DBL_COLON) {
+        is_exported = true;
+        parser_next_token(parser); /* consume '::' */
+    } else if (parser_current_token(parser) == ':') {
+        /* Check if this is a local label (@@label:) */
+        if (label_name[0] == '@' && label_name[1] == '@') {
+            is_local = true;
+        }
+        parser_next_token(parser); /* consume ':' */
+    } else {
+        parser_error(parser, (U8*)"Expected ':' or '::' after label name");
+        return NULL;
+    }
+    
+    /* Create label statement node */
+    ASTNode *label_node = ast_node_new(NODE_LABEL, line, column);
+    if (!label_node) {
+        return NULL;
+    }
+    
+    /* Initialize label statement data */
+    label_node->data.label_stmt.label_name = label_name;
+    label_node->data.label_stmt.is_exported = is_exported;
+    label_node->data.label_stmt.is_local = is_local;
+    label_node->data.label_stmt.label_address = 0; /* Will be set during codegen */
+    
+    printf("DEBUG: Label statement parsed successfully, name: %s, exported: %s, local: %s\n", 
+           label_name, is_exported ? "true" : "false", is_local ? "true" : "false");
+    return label_node;
+}
+
+ASTNode* parse_array_initializer(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing array initializer, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect '{' */
+    if (parser_current_token(parser) != '{') {
+        parser_error(parser, (U8*)"Expected '{' for array initializer");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '{' */
+    
+    /* Parse array elements */
+    ASTNode *elements = NULL;
+    ASTNode *last_element = NULL;
+    I64 element_count = 0;
+    
+    /* Parse elements until we hit '}' */
+    while (parser_current_token(parser) != '}' && parser_current_token(parser) != TK_EOF) {
+        ASTNode *element = parse_expression(parser);
+        if (!element) {
+            parser_error(parser, (U8*)"Failed to parse array element");
+            if (elements) ast_node_free(elements);
+            return NULL;
+        }
+        
+        /* Add to elements list */
+        if (!elements) {
+            elements = element;
+            last_element = element;
+        } else {
+            last_element->next = element;
+            last_element = element;
+        }
+        element_count++;
+        
+        /* Check for comma separator */
+        if (parser_current_token(parser) == ',') {
+            parser_next_token(parser); /* consume ',' */
+        } else if (parser_current_token(parser) != '}') {
+            parser_error(parser, (U8*)"Expected ',' or '}' in array initializer");
+            if (elements) ast_node_free(elements);
+            return NULL;
+        }
+    }
+    
+    /* Expect '}' */
+    if (parser_current_token(parser) != '}') {
+        parser_error(parser, (U8*)"Expected '}' to close array initializer");
+        if (elements) ast_node_free(elements);
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '}' */
+    
+    /* Create array initializer node */
+    ASTNode *array_init = ast_node_new(NODE_ARRAY_INIT, line, column);
+    if (!array_init) {
+        if (elements) ast_node_free(elements);
+        return NULL;
+    }
+    
+    /* Initialize array initializer data */
+    array_init->data.array_init.elements = elements;
+    array_init->data.array_init.element_count = element_count;
+    
+    printf("DEBUG: Array initializer parsed successfully with %ld elements\n", element_count);
+    return array_init;
+}
+
+ASTNode* parse_pointer_dereference(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing pointer dereference, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect '*' */
+    if (parser_current_token(parser) != '*') {
+        parser_error(parser, (U8*)"Expected '*' for pointer dereference");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '*' */
+    
+    /* Parse the pointer expression */
+    ASTNode *pointer = parse_primary_expression(parser);
+    if (!pointer) {
+        parser_error(parser, (U8*)"Expected pointer expression after '*'");
+        return NULL;
+    }
+    
+    /* Create pointer dereference node */
+    ASTNode *deref_node = ast_node_new(NODE_POINTER_DEREF, line, column);
+    if (!deref_node) {
+        ast_node_free(pointer);
+        return NULL;
+    }
+    
+    /* Initialize pointer dereference data */
+    deref_node->data.pointer_deref.pointer = pointer;
+    
+    printf("DEBUG: Pointer dereference parsed successfully\n");
+    return deref_node;
+}
+
+ASTNode* parse_address_of(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing address-of, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect '&' */
+    if (parser_current_token(parser) != '&') {
+        parser_error(parser, (U8*)"Expected '&' for address-of");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume '&' */
+    
+    /* Parse the variable expression */
+    ASTNode *variable = parse_primary_expression(parser);
+    if (!variable) {
+        parser_error(parser, (U8*)"Expected variable expression after '&'");
+        return NULL;
+    }
+    
+    /* Create address-of node */
+    ASTNode *addr_node = ast_node_new(NODE_ADDRESS_OF, line, column);
+    if (!addr_node) {
+        ast_node_free(variable);
+        return NULL;
+    }
+    
+    /* Initialize address-of data */
+    addr_node->data.address_of.variable = variable;
+    
+    printf("DEBUG: Address-of parsed successfully\n");
+    return addr_node;
+}
+
+/*
+ * Parse start/end block for sub-switch statements
+ */
+ASTNode* parse_start_end_block(ParserState *parser, Bool is_start) {
+    if (!parser) return NULL;
+    
+    printf("DEBUG: Parsing %s block, current token: %d\n", is_start ? "start" : "end", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    /* Expect 'start' or 'end' keyword */
+    SchismTokenType expected_token = is_start ? TK_START : TK_END;
+    if (parser_current_token(parser) != expected_token) {
+        parser_error(parser, (U8*)(is_start ? "Expected 'start' keyword" : "Expected 'end' keyword"));
+        return NULL;
+    }
+    parser_next_token(parser); /* consume 'start' or 'end' */
+    
+    /* Expect ':' */
+    if (parser_current_token(parser) != ':') {
+        parser_error(parser, (U8*)"Expected ':' after start/end keyword");
+        return NULL;
+    }
+    parser_next_token(parser); /* consume ':' */
+    
+    /* Parse statements in the block */
+    ASTNode *statements = NULL;
+    ASTNode *last_stmt = NULL;
+    
+    /* Parse statements until we hit another case, default, start, end, or closing brace */
+    while (parser_current_token(parser) != TK_CASE && 
+           parser_current_token(parser) != TK_DEFAULT && 
+           parser_current_token(parser) != TK_START && 
+           parser_current_token(parser) != TK_END && 
+           parser_current_token(parser) != '}' && 
+           parser_current_token(parser) != TK_EOF) {
+        
+        ASTNode *stmt = parse_statement(parser);
+        if (!stmt) {
+            parser_error(parser, (U8*)"Failed to parse statement in start/end block");
+            if (statements) ast_node_free(statements);
+            return NULL;
+        }
+        
+        /* Add to statements list */
+        if (!statements) {
+            statements = stmt;
+            last_stmt = stmt;
+        } else {
+            last_stmt->next = stmt;
+            last_stmt = stmt;
+        }
+    }
+    
+    /* Create start/end block node */
+    ASTNode *block_node = ast_node_new(is_start ? NODE_START_BLOCK : NODE_END_BLOCK, line, column);
+    if (!block_node) {
+        if (statements) ast_node_free(statements);
+        return NULL;
+    }
+    
+    /* Initialize start/end block data */
+    block_node->data.start_end_block.statements = statements;
+    block_node->data.start_end_block.is_start = is_start;
+    
+    printf("DEBUG: %s block parsed successfully\n", is_start ? "Start" : "End");
+    return block_node;
+}
+
+/*
+ * Parse simple expressions (identifiers and constants only) to avoid circular dependencies
+ */
+ASTNode* parse_simple_expression(ParserState *parser) {
+    if (!parser) return NULL;
+    
+    SchismTokenType current = parser_current_token(parser);
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    switch (current) {
+        case TK_IDENT: {
+            /* Identifier */
+            ASTNode *node = ast_node_new(NODE_IDENTIFIER, line, column);
+            if (!node) return NULL;
+            
+            U8 *name = parser_current_token_value(parser);
+            if (name) {
+                I64 len = strlen((char*)name);
+                node->data.identifier.name = (U8*)malloc(len + 1);
+                if (node->data.identifier.name) {
+                    strcpy((char*)node->data.identifier.name, (char*)name);
+                }
+            }
+            
+            parser_next_token(parser);
+            return node;
+        }
+        
+        case TK_I64: {
+            /* Integer literal */
+            ASTNode *node = ast_node_new(NODE_INTEGER, line, column);
+            if (!node) return NULL;
+            
+            U8 *value = parser_current_token_value(parser);
+            if (value) {
+                node->data.literal.i64_value = strtoll((char*)value, NULL, 0);
+            }
+            
+            parser_next_token(parser);
+            return node;
+        }
+        
+        case TK_F64: {
+            /* Float literal */
+            ASTNode *node = ast_node_new(NODE_FLOAT, line, column);
+            if (!node) return NULL;
+            
+            U8 *value = parser_current_token_value(parser);
+            if (value) {
+                node->data.literal.f64_value = strtod((char*)value, NULL);
+            }
+            
+            parser_next_token(parser);
+            return node;
+        }
+        
+        case TK_TRUE:
+        case TK_FALSE: {
+            /* Boolean literal */
+            Bool bool_value = (current == TK_TRUE);
+            parser_next_token(parser);
+            
+            ASTNode *node = ast_node_new(NODE_BOOLEAN, line, column);
+            if (!node) return NULL;
+            
+            node->data.boolean.value = bool_value;
+            return node;
+        }
+        
+        default:
+            return NULL;
+    }
+}
+
+/*
+ * Parse range comparison expressions (5<i<j+1<20)
+ */
+ASTNode* parse_range_comparison(ParserState *parser, ASTNode *first_expr) {
+    if (!parser || !first_expr) return NULL;
+    
+    printf("DEBUG: parse_range_comparison - starting, current token: %d\n", parser_current_token(parser));
+    
+    I64 line = parser_current_line(parser);
+    I64 column = parser_current_column(parser);
+    
+    printf("DEBUG: parse_range_comparison - using provided first expression\n");
+    printf("DEBUG: parse_range_comparison - first_expr type: %d\n", first_expr->type);
+    
+    /* Collect all expressions and operators in the range */
+    ASTNode *expressions = first_expr;
+    ASTNode *operators = NULL;
+    ASTNode *last_expr = first_expr;
+    ASTNode *last_op = NULL;
+    I64 expression_count = 1;
+    
+    /* Parse the range chain */
+    printf("DEBUG: parse_range_comparison - entering while loop, current token: %d\n", parser_current_token(parser));
+    while (parser_current_token(parser) == '<' || parser_current_token(parser) == '>' ||
+           parser_current_token(parser) == TK_LESS_EQU || parser_current_token(parser) == TK_GREATER_EQU) {
+        printf("DEBUG: parse_range_comparison - in while loop, current token: %d\n", parser_current_token(parser));
+        
+        /* Get the comparison operator */
+        SchismTokenType op = parser_current_token(parser);
+        parser_next_token(parser); /* consume operator */
+        
+        /* Create operator node */
+        ASTNode *op_node = ast_node_new(NODE_BINARY_OP, parser_current_line(parser), parser_current_column(parser));
+        if (!op_node) {
+            ast_node_free(expressions);
+            if (operators) ast_node_free(operators);
+            return NULL;
+        }
+        
+        /* Set operator type */
+        switch (op) {
+            case '<': op_node->data.binary_op.op = BINOP_LT; break;
+            case '>': op_node->data.binary_op.op = BINOP_GT; break;
+            case TK_LESS_EQU: op_node->data.binary_op.op = BINOP_LE; break;
+            case TK_GREATER_EQU: op_node->data.binary_op.op = BINOP_GE; break;
+            default: op_node->data.binary_op.op = BINOP_LT; break;
+        }
+        
+        /* Add operator to operators list */
+        if (!operators) {
+            operators = op_node;
+            last_op = op_node;
+        } else {
+            last_op->next = op_node;
+            last_op = op_node;
+        }
+        
+        /* Parse the next expression - use simple identifier/constant to avoid circular dependency */
+        ASTNode *next_expr = parse_simple_expression(parser);
+        if (!next_expr) {
+            parser_error(parser, (U8*)"Expected expression after comparison operator in range");
+            ast_node_free(expressions);
+            ast_node_free(operators);
+            return NULL;
+        }
+        
+        /* Add expression to expressions list */
+        last_expr->next = next_expr;
+        last_expr = next_expr;
+        expression_count++;
+    }
+    
+    /* Create range comparison node */
+    ASTNode *range_node = ast_node_new(NODE_RANGE_COMPARISON, line, column);
+    if (!range_node) {
+        ast_node_free(expressions);
+        ast_node_free(operators);
+        return NULL;
+    }
+    
+    /* Initialize range comparison data */
+    range_node->data.range_comparison.expressions = expressions;
+    range_node->data.range_comparison.operators = operators;
+    range_node->data.range_comparison.expression_count = expression_count;
+    
+    printf("DEBUG: Range comparison parsed successfully with %ld expressions\n", expression_count);
+    return range_node;
 }

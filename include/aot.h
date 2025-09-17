@@ -55,7 +55,7 @@ typedef struct {
 } PECOFFHeader;
 
 typedef struct {
-    U16 magic;                      /* Magic number (0x20b for PE32+) */
+    U16 magic;                      /* Magic number (0x10b for PE32, 0x20b for PE32+) */
     U8 major_linker_version;
     U8 minor_linker_version;
     U32 size_of_code;               /* Size of code section */
@@ -63,7 +63,7 @@ typedef struct {
     U32 size_of_uninitialized_data; /* Size of uninitialized data */
     U32 address_of_entry_point;     /* Address of entry point */
     U32 base_of_code;               /* Base of code */
-    U64 image_base;                 /* Image base address */
+    U32 image_base;                 /* Image base address (32-bit for PE32) */
     U32 section_alignment;          /* Section alignment */
     U32 file_alignment;             /* File alignment */
     U16 major_os_version;
@@ -78,10 +78,10 @@ typedef struct {
     U32 checksum;
     U16 subsystem;                  /* Subsystem (PE_SUBSYSTEM_CONSOLE) */
     U16 dll_characteristics;
-    U64 size_of_stack_reserve;
-    U64 size_of_stack_commit;
-    U64 size_of_heap_reserve;
-    U64 size_of_heap_commit;
+    U32 size_of_stack_reserve;      /* Stack reserve (32-bit for PE32) */
+    U32 size_of_stack_commit;       /* Stack commit (32-bit for PE32) */
+    U32 size_of_heap_reserve;       /* Heap reserve (32-bit for PE32) */
+    U32 size_of_heap_commit;        /* Heap commit (32-bit for PE32) */
     U32 loader_flags;
     U32 num_rva_and_sizes;          /* Number of RVA and sizes */
 } PEOptionalHeader;
@@ -157,7 +157,6 @@ Bool aot_generate_export_table(AOTContext *ctx);
 Bool aot_generate_relocations(AOTContext *ctx);
 
 /* Binary Output */
-Bool aot_write_binary(AOTContext *ctx, const char *filename);
 Bool aot_write_binary_windows(AOTContext *ctx, const char *filename);
 Bool aot_append_binary(AOTContext *ctx, const U8 *data, I64 size);
 Bool aot_align_binary(AOTContext *ctx, I64 alignment);

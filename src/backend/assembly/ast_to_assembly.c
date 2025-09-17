@@ -128,7 +128,7 @@ Bool ast_to_assembly_string_literal(AssemblyContext *ctx, ASTNode *node) {
     
     /* Allocate registers for function call */
     X86Register arg_reg = asm_allocate_register(ctx, 8);
-    if (arg_reg == REG_NONE) {
+    if (arg_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for string argument\n");
         return false;
     }
@@ -168,7 +168,7 @@ Bool ast_to_assembly_integer_literal(AssemblyContext *ctx, ASTNode *node) {
     
     /* Allocate registers for function call */
     X86Register arg_reg = asm_allocate_register(ctx, 8);
-    if (arg_reg == REG_NONE) {
+    if (arg_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for integer argument\n");
         return false;
     }
@@ -208,7 +208,7 @@ Bool ast_to_assembly_float_literal(AssemblyContext *ctx, ASTNode *node) {
     
     /* Allocate registers for function call */
     X86Register arg_reg = asm_allocate_register(ctx, 8);
-    if (arg_reg == REG_NONE) {
+    if (arg_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for float argument\n");
         return false;
     }
@@ -248,7 +248,7 @@ Bool ast_to_assembly_char_literal(AssemblyContext *ctx, ASTNode *node) {
     
     /* Allocate registers for function call */
     X86Register arg_reg = asm_allocate_register(ctx, 8);
-    if (arg_reg == REG_NONE) {
+    if (arg_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for char argument\n");
         return false;
     }
@@ -305,11 +305,11 @@ Bool ast_to_assembly_binary_operation(AssemblyContext *ctx, ASTNode *node) {
     X86Register right_reg = asm_allocate_register(ctx, 8);
     X86Register result_reg = asm_allocate_register(ctx, 8);
     
-    if (left_reg == REG_NONE || right_reg == REG_NONE || result_reg == REG_NONE) {
+    if (left_reg == X86_REG_NONE || right_reg == X86_REG_NONE || result_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate registers for binary operation\n");
-        if (left_reg != REG_NONE) asm_free_register(ctx, left_reg);
-        if (right_reg != REG_NONE) asm_free_register(ctx, right_reg);
-        if (result_reg != REG_NONE) asm_free_register(ctx, result_reg);
+        if (left_reg != X86_REG_NONE) asm_free_register(ctx, left_reg);
+        if (right_reg != X86_REG_NONE) asm_free_register(ctx, right_reg);
+        if (result_reg != X86_REG_NONE) asm_free_register(ctx, result_reg);
         return false;
     }
     
@@ -468,11 +468,11 @@ Bool ast_to_assembly_function_call(AssemblyContext *ctx, ASTNode *node) {
                 /* First 4 arguments go in registers */
                 X86Register reg;
                 switch (arg_index) {
-                    case 0: reg = REG_RCX; break;
-                    case 1: reg = REG_RDX; break;
-                    case 2: reg = REG_R8; break;
-                    case 3: reg = REG_R9; break;
-                    default: reg = REG_RCX; break;
+                    case 0: reg = X86_REG_RCX; break;
+                    case 1: reg = X86_REG_RDX; break;
+                    case 2: reg = X86_REG_R8; break;
+                    case 3: reg = X86_REG_R9; break;
+                    default: reg = X86_REG_RCX; break;
                 }
                 
                 printf("DEBUG: Argument %lld -> register %d\n", arg_index, reg);
@@ -485,7 +485,7 @@ Bool ast_to_assembly_function_call(AssemblyContext *ctx, ASTNode *node) {
                 
                 /* TODO: Move result to appropriate register */
                 /* For now, assume the argument evaluation leaves result in RAX */
-                if (reg != REG_RAX) {
+                if (reg != X86_REG_RAX) {
                     /* MOV <reg>, RAX */
                     if (ctx->instruction_pointer + 3 > ctx->buffer_capacity) {
                         printf("ERROR: Not enough space for register move\n");
@@ -498,7 +498,7 @@ Bool ast_to_assembly_function_call(AssemblyContext *ctx, ASTNode *node) {
                     ctx->instruction_pointer++;
                     
                     /* ModR/M byte: MOV <reg>, RAX */
-                    U8 modrm = 0xC0 | (reg << 3) | REG_RAX;
+                    U8 modrm = 0xC0 | (reg << 3) | X86_REG_RAX;
                     ctx->assembly_buffer[ctx->instruction_pointer] = modrm;
                     ctx->instruction_pointer++;
                     
@@ -639,7 +639,7 @@ Bool ast_to_assembly_assignment(AssemblyContext *ctx, ASTNode *node) {
     
     /* Allocate a register for the result */
     X86Register result_reg = asm_allocate_register(ctx, 8);
-    if (result_reg == REG_NONE) {
+    if (result_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for assignment result\n");
         return false;
     }
@@ -649,7 +649,7 @@ Bool ast_to_assembly_assignment(AssemblyContext *ctx, ASTNode *node) {
     CAsmArg src_arg = {0};
     
     /* Setup destination: variable on stack */
-    asm_setup_memory_arg(ctx, &dst_arg, REG_RSP, left->data.identifier.stack_offset);
+    asm_setup_memory_arg(ctx, &dst_arg, X86_REG_RSP, left->data.identifier.stack_offset);
     
     /* Setup source: register with the value */
     asm_setup_register_arg(ctx, &src_arg, result_reg);
@@ -706,7 +706,7 @@ Bool ast_to_assembly_variable_reference(AssemblyContext *ctx, ASTNode *node) {
     
     // Allocate a register for the variable value
     X86Register result_reg = asm_allocate_register(ctx, 8);
-    if (result_reg == REG_NONE) {
+    if (result_reg == X86_REG_NONE) {
         printf("ERROR: Failed to allocate register for variable reference\n");
         return false;
     }
@@ -716,7 +716,7 @@ Bool ast_to_assembly_variable_reference(AssemblyContext *ctx, ASTNode *node) {
     CAsmArg src_arg = {0};
     
     asm_setup_register_arg(ctx, &dst_arg, result_reg);
-    asm_setup_memory_arg(ctx, &src_arg, REG_RSP, node->data.identifier.stack_offset);
+    asm_setup_memory_arg(ctx, &src_arg, X86_REG_RSP, node->data.identifier.stack_offset);
     
     if (!asm_generate_mov(ctx, &dst_arg, &src_arg)) {
         printf("ERROR: Failed to generate MOV instruction for variable reference\n");

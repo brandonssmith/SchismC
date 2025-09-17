@@ -51,6 +51,10 @@ CCmpCtrl* ccmpctrl_new(void) {
     /* Initialize AOT control */
     cc->aotc = (CAOTCtrl*)malloc(sizeof(CAOTCtrl));
     if (cc->aotc) {
+        /* Initialize all fields to zero first */
+        memset(cc->aotc, 0, sizeof(CAOTCtrl));
+        
+        /* Set specific initial values */
         cc->aotc->rip = 0;
         cc->aotc->num_bin_U8s = 0;
         cc->aotc->max_align_bits = 0;
@@ -415,7 +419,7 @@ CAsmArg* asmarg_create_memory(X86Register base, X86Register index, I64 scale, I6
     arg->indirect = true;
     
     /* Set addressing mode */
-    if (index == REG_NONE) {
+    if (index == X86_REG_NONE) {
         arg->addr_mode = ADDR_INDIRECT;
     } else if (scale > 1) {
         arg->addr_mode = ADDR_DISP_SCALE;
@@ -444,13 +448,13 @@ CAsmArg* asmarg_create_absolute(I64 address, I64 size) {
  */
 
 X86Register allocate_register(CCmpCtrl *cc, I64 size) {
-    if (!cc) return REG_NONE;
+    if (!cc) return X86_REG_NONE;
     
     /* Simple register allocation - find first available register */
-    X86Register regs_64[] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSI, REG_RDI, REG_R8, REG_R9};
-    X86Register regs_32[] = {REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESI, REG_EDI, REG_R8, REG_R9};
-    X86Register regs_16[] = {REG_AX, REG_CX, REG_DX, REG_BX, REG_SI, REG_DI, REG_R8, REG_R9};
-    X86Register regs_8[] = {REG_AL, REG_CL, REG_DL, REG_BL, REG_R8B, REG_R9B, REG_R10B, REG_R11B};
+    X86Register regs_64[] = {X86_REG_RAX, X86_REG_RCX, X86_REG_RDX, X86_REG_RBX, X86_REG_RSI, X86_REG_RDI, X86_REG_R8, X86_REG_R9};
+    X86Register regs_32[] = {X86_REG_EAX, X86_REG_ECX, X86_REG_EDX, X86_REG_EBX, X86_REG_ESI, X86_REG_EDI, X86_REG_R8, X86_REG_R9};
+    X86Register regs_16[] = {X86_REG_AX, X86_REG_CX, X86_REG_DX, X86_REG_BX, X86_REG_SI, X86_REG_DI, X86_REG_R8, X86_REG_R9};
+    X86Register regs_8[] = {X86_REG_AL, X86_REG_CL, X86_REG_DL, X86_REG_BL, X86_REG_R8B, X86_REG_R9B, X86_REG_R10B, X86_REG_R11B};
     
     X86Register *regs;
     I64 count;
@@ -460,7 +464,7 @@ X86Register allocate_register(CCmpCtrl *cc, I64 size) {
         case 4: regs = regs_32; count = sizeof(regs_32)/sizeof(regs_32[0]); break;
         case 2: regs = regs_16; count = sizeof(regs_16)/sizeof(regs_16[0]); break;
         case 1: regs = regs_8; count = sizeof(regs_8)/sizeof(regs_8[0]); break;
-        default: return REG_NONE;
+        default: return X86_REG_NONE;
     }
     
     /* Check if register is available (simple bit mask) */
@@ -471,23 +475,23 @@ X86Register allocate_register(CCmpCtrl *cc, I64 size) {
         }
     }
     
-    return REG_NONE;  /* No registers available */
+    return X86_REG_NONE;  /* No registers available */
 }
 
 void free_register(CCmpCtrl *cc, X86Register reg) {
-    if (!cc || reg == REG_NONE) return;
+    if (!cc || reg == X86_REG_NONE) return;
     
     cc->current_register_set &= ~(1ULL << reg);
 }
 
 Bool is_register_allocated(CCmpCtrl *cc, X86Register reg) {
-    if (!cc || reg == REG_NONE) return false;
+    if (!cc || reg == X86_REG_NONE) return false;
     
     return (cc->current_register_set & (1ULL << reg)) != 0;
 }
 
 void spill_register(CCmpCtrl *cc, X86Register reg) {
-    if (!cc || reg == REG_NONE) return;
+    if (!cc || reg == X86_REG_NONE) return;
     
     /* For now, just free the register - in a real implementation,
        we would save its value to memory */
@@ -526,10 +530,10 @@ Bool encode_x86_instruction(CAsmArg *arg1, CAsmArg *arg2, U8 opcode, U8 *output,
     
     /* Add REX prefix if needed (x86-64 extension) */
     U8 rex = 0x40;  /* Base REX prefix */
-    if (arg1 && (arg1->reg1 >= REG_R8 || arg1->reg2 >= REG_R8)) {
+    if (arg1 && (arg1->reg1 >= X86_REG_R8 || arg1->reg2 >= X86_REG_R8)) {
         rex |= 0x01;  /* REX.B */
     }
-    if (arg2 && (arg2->reg1 >= REG_R8 || arg2->reg2 >= REG_R8)) {
+    if (arg2 && (arg2->reg1 >= X86_REG_R8 || arg2->reg2 >= X86_REG_R8)) {
         rex |= 0x04;  /* REX.R */
     }
     if (rex != 0x40) {
@@ -558,8 +562,8 @@ I64 calculate_instruction_size(CAsmArg *arg1, CAsmArg *arg2, U8 opcode) {
     if (opcode >= 0xF0) size++;  /* Multi-byte opcodes */
     
     /* Add REX prefix if needed */
-    if (arg1 && (arg1->reg1 >= REG_R8 || arg1->reg2 >= REG_R8)) size++;
-    if (arg2 && (arg2->reg1 >= REG_R8 || arg2->reg2 >= REG_R8)) size++;
+    if (arg1 && (arg1->reg1 >= X86_REG_R8 || arg1->reg2 >= X86_REG_R8)) size++;
+    if (arg2 && (arg2->reg1 >= X86_REG_R8 || arg2->reg2 >= X86_REG_R8)) size++;
     
     /* Add ModR/M byte for register/memory operands */
     if (arg1 && arg2) size++;

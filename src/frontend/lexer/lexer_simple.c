@@ -13,7 +13,7 @@
 /* Simple lexer state */
 typedef struct {
     FILE *input_file;
-    TokenType current_token;
+    SchismTokenType current_token;
     U8 *token_value;
     I64 line;
     I64 column;
@@ -45,7 +45,7 @@ void lexer_free(LexerState *lexer) {
     free(lexer);
 }
 
-TokenType lex_next_token(LexerState *lexer) {
+SchismTokenType lex_next_token(LexerState *lexer) {
     if (!lexer || !lexer->input_file) return TK_EOF;
     
     int c = fgetc(lexer->input_file);
@@ -106,11 +106,11 @@ TokenType lex_next_token(LexerState *lexer) {
     }
 }
 
-TokenType lex_peek_token(LexerState *lexer) {
+SchismTokenType lex_peek_token(LexerState *lexer) {
     if (!lexer) return TK_EOF;
     
     long pos = ftell(lexer->input_file);
-    TokenType token = lex_next_token(lexer);
+    SchismTokenType token = lex_next_token(lexer);
     fseek(lexer->input_file, pos, SEEK_SET);
     return token;
 }
@@ -153,7 +153,7 @@ Bool lex_is_builtin_type(U8 *str) {
     return false;  /* TODO: Implement */
 }
 
-TokenType lex_get_builtin_type_token(U8 *str) {
+SchismTokenType lex_get_builtin_type_token(U8 *str) {
     return TK_IDENT;  /* TODO: Implement */
 }
 

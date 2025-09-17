@@ -124,11 +124,11 @@ typedef enum {
     TK_DEREFERENCE,
     TK_RANGE,                    /* HolyC range operator (..) */
     TK_COUNT
-} TokenType;
+} SchismTokenType;
 
 /* Token Structure */
 typedef struct {
-    TokenType type;
+    SchismTokenType type;
     String value;
     I64 line;
     I64 column;

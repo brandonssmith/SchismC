@@ -13,6 +13,7 @@
 #include "backend.h"
 #include "aot.h"
 #include "masm_output.h"
+#include "debug.h"
 
 /* Function prototypes */
 Bool test_pe_executable_generation(void);
@@ -21,87 +22,251 @@ Bool test_masm_output_generation(void);
 /* Function to create a simple working executable */
 Bool create_simple_hello_executable(const char *filename);
 
+/* Function to compile using MASM toolchain */
+Bool compile_with_masm_toolchain(ASTNode *ast, const char *output_filename);
+
 int main(int argc, char *argv[]) {
-    fflush(stdout);
-    printf("DEBUG: main - function entry\n");
-    fflush(stdout);
-    printf("SchismC Compiler - Assembly-Based HolyC Port\n");
-    printf("============================================\n");
+    /* Initialize debug system */
+    debug_system_init();
+    
+    DEBUG_GENERAL(DEBUG_INFO, "SchismC Compiler - Assembly-Based HolyC Port");
+    DEBUG_GENERAL(DEBUG_INFO, "============================================");
     
     if (argc < 2) {
-        printf("Usage: %s <input_file> [-o output_file]\n", argv[0]);
+        printf("Usage: %s <input_file> [-o output_file] [debug_options]\n", argv[0]);
+        printf("\nDebug Options:\n");
+        printf("  -v, --verbose              Enable verbose output\n");
+        printf("  --trace                    Enable full tracing\n");
+        printf("  --debug-level <level>      Set debug level (none|error|warning|info|verbose|trace|all)\n");
+        printf("  --log-file <file>          Write debug output to file\n");
+        printf("  --no-color                 Disable colored output\n");
+        printf("  --no-timestamp             Disable timestamps\n");
+        printf("  --show-category            Show debug category\n");
+        printf("  --show-location            Show file:line location\n");
+        printf("  --debug-categories <list>  Enable specific categories (comma-separated)\n");
+        printf("  --debug-tokens             Debug tokenization only\n");
         return 1;
+    }
+    
+    /* Parse debug options */
+    DebugOptions *debug_options = debug_options_parse(argc, argv);
+    if (debug_options) {
+        debug_options_apply(g_debug_ctx, debug_options);
     }
     
     char *input_file = argv[1];
     char *output_file = NULL;
+    Bool debug_tokens_only = false;
     
-    printf("DEBUG: main - input file: %s\n", input_file);
+    DEBUG_GENERAL(DEBUG_INFO, "Input file: %s", input_file);
     
-    /* Parse command line arguments */
+    /* Parse command line arguments (skip debug options) */
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_file = argv[i + 1];
             i++;  /* Skip the output filename */
         }
+        else if (strcmp(argv[i], "--debug-tokens") == 0) {
+            debug_tokens_only = true;
+        }
+        /* Skip debug options that were already processed */
+        else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0 ||
+                 strcmp(argv[i], "--trace") == 0 || strcmp(argv[i], "--debug-level") == 0 ||
+                 strcmp(argv[i], "--log-file") == 0 || strcmp(argv[i], "--no-color") == 0 ||
+                 strcmp(argv[i], "--no-timestamp") == 0 || strcmp(argv[i], "--show-category") == 0 ||
+                 strcmp(argv[i], "--show-location") == 0 || strcmp(argv[i], "--debug-categories") == 0) {
+            if (strcmp(argv[i], "--debug-level") == 0 || strcmp(argv[i], "--log-file") == 0 ||
+                strcmp(argv[i], "--debug-categories") == 0) {
+                i++; /* Skip the argument value */
+            }
+        }
     }
     
-    printf("Input file: %s\n", input_file);
     if (output_file) {
-        printf("Output file: %s\n", output_file);
+        DEBUG_GENERAL(DEBUG_INFO, "Output file: %s", output_file);
     }
     
     /* Test core structures */
-    printf("DEBUG: main - about to create CCmpCtrl\n");
+    DEBUG_GENERAL(DEBUG_VERBOSE, "Creating CCmpCtrl");
     CCmpCtrl *cc = ccmpctrl_new();
-    printf("DEBUG: main - CCmpCtrl created: %p\n", cc);
+    DEBUG_GENERAL(DEBUG_VERBOSE, "CCmpCtrl created: %p", cc);
     if (cc) {
-        printf("✓ CCmpCtrl created successfully\n");
-        printf("  - Assembly mode: %s\n", cc->use_64bit_mode ? "x86-64" : "x86-32");
-        printf("  - RIP-relative: %s\n", cc->use_rip_relative ? "enabled" : "disabled");
-        printf("  - Extended regs: %s\n", cc->use_extended_regs ? "enabled" : "disabled");
+        DEBUG_GENERAL(DEBUG_INFO, "✓ CCmpCtrl created successfully");
+        DEBUG_GENERAL(DEBUG_VERBOSE, "  - Assembly mode: %s", cc->use_64bit_mode ? "x86-64" : "x86-32");
+        DEBUG_GENERAL(DEBUG_VERBOSE, "  - RIP-relative: %s", cc->use_rip_relative ? "enabled" : "disabled");
+        DEBUG_GENERAL(DEBUG_VERBOSE, "  - Extended regs: %s", cc->use_extended_regs ? "enabled" : "disabled");
         ccmpctrl_free(cc);
     } else {
-        printf("✗ Failed to create CCmpCtrl\n");
+        DEBUG_ERROR(DEBUG_CAT_GENERAL, "✗ Failed to create CCmpCtrl");
+        debug_system_cleanup();
         return 1;
     }
     
     /* Test lexer */
-    printf("DEBUG: main - about to open input file: %s\n", argv[1]);
+    DEBUG_LEXER(DEBUG_VERBOSE, "Opening input file: %s", argv[1]);
     FILE *input = fopen(argv[1], "r");
-    printf("DEBUG: main - file opened: %p\n", input);
+    DEBUG_LEXER(DEBUG_VERBOSE, "File opened: %p", input);
     if (!input) {
-        printf("✗ Failed to open input file: %s\n", argv[1]);
+        DEBUG_ERROR(DEBUG_CAT_LEXER, "✗ Failed to open input file: %s", argv[1]);
+        debug_system_cleanup();
         return 1;
     }
     
-    printf("DEBUG: main - about to create lexer\n");
-    printf("DEBUG: main - input file pointer: %p\n", input);
+    DEBUG_LEXER(DEBUG_VERBOSE, "Creating lexer");
+    DEBUG_LEXER(DEBUG_VERBOSE, "Input file pointer: %p", input);
     LexerState *lexer = lexer_new(input);
-    printf("DEBUG: main - lexer_new returned: %p\n", lexer);
+    DEBUG_LEXER(DEBUG_VERBOSE, "lexer_new returned: %p", lexer);
     if (lexer) {
-        printf("✓ Lexer created successfully\n");
+        DEBUG_LEXER(DEBUG_INFO, "✓ Lexer created successfully");
         
         /* Test tokenization */
-        printf("DEBUG: main - about to get first token\n");
-        TokenType first_token = lex_next_token(lexer);
-        printf("✓ First token: %d\n", first_token);
+        DEBUG_LEXER(DEBUG_VERBOSE, "Getting first token");
+        SchismTokenType first_token = lex_next_token(lexer);
+        DEBUG_LEXER(DEBUG_INFO, "✓ First token: %d", first_token);
+        
+        /* Token debugging mode */
+        if (debug_tokens_only) {
+            printf("\n=== Token Debug Mode ===\n");
+            printf("Tokenizing file: %s\n", input_file);
+            printf("\n");
+            
+            int token_count = 0;
+            SchismTokenType current_token = first_token;
+            
+            while (current_token != TK_EOF) {
+                token_count++;
+                
+                printf("Token %d: %d", token_count, current_token);
+                
+                /* Print token name if possible */
+                switch (current_token) {
+                    case TK_EOF: printf(" (EOF)"); break;
+                    case TK_IDENT: printf(" (IDENT: %s)", lexer->token_value ? (char*)lexer->token_value : "NULL"); break;
+                    case TK_STR: printf(" (STRING: %s)", lexer->token_value ? (char*)lexer->token_value : "NULL"); break;
+                    case TK_CHAR_CONST: printf(" (CHAR: %s)", lexer->token_value ? (char*)lexer->token_value : "NULL"); break;
+                    case TK_I64: printf(" (I64: %s)", lexer->token_value ? (char*)lexer->token_value : "NULL"); break;
+                    case TK_F64: printf(" (F64: %s)", lexer->token_value ? (char*)lexer->token_value : "NULL"); break;
+                    case TK_TYPE_I64: printf(" (TYPE_I64)"); break;
+                    case TK_IF: printf(" (IF)"); break;
+                    case TK_ELSE: printf(" (ELSE)"); break;
+                    case TK_WHILE: printf(" (WHILE)"); break;
+                    case TK_FOR: printf(" (FOR)"); break;
+                    case TK_RETURN: printf(" (RETURN)"); break;
+                    case TK_TYPE_I0: printf(" (TYPE_I0)"); break;
+                    case TK_TYPE_I8: printf(" (TYPE_I8)"); break;
+                    case TK_TYPE_I16: printf(" (TYPE_I16)"); break;
+                    case TK_TYPE_I32: printf(" (TYPE_I32)"); break;
+                    case TK_TYPE_U0: printf(" (TYPE_U0)"); break;
+                    case TK_TYPE_U8: printf(" (TYPE_U8)"); break;
+                    case TK_TYPE_U16: printf(" (TYPE_U16)"); break;
+                    case TK_TYPE_U32: printf(" (TYPE_U32)"); break;
+                    case TK_TYPE_U64: printf(" (TYPE_U64)"); break;
+                    case TK_TYPE_F32: printf(" (TYPE_F32)"); break;
+                    case TK_TYPE_F64: printf(" (TYPE_F64)"); break;
+                    case TK_TYPE_BOOL: printf(" (TYPE_BOOL)"); break;
+                    case TK_TYPE_STRING: printf(" (TYPE_STRING)"); break;
+                    case TK_ELLIPSIS: printf(" (ELLIPSIS)"); break;
+                    case TK_EQU_EQU: printf(" (EQU_EQU)"); break;
+                    case TK_NOT_EQU: printf(" (NOT_EQU)"); break;
+                    case TK_LESS_EQU: printf(" (LESS_EQU)"); break;
+                    case TK_GREATER_EQU: printf(" (GREATER_EQU)"); break;
+                    case TK_AND_AND: printf(" (AND_AND)"); break;
+                    case TK_OR_OR: printf(" (OR_OR)"); break;
+                    case TK_XOR_XOR: printf(" (XOR_XOR)"); break;
+                    case TK_PLUS_PLUS: printf(" (PLUS_PLUS)"); break;
+                    case TK_MINUS_MINUS: printf(" (MINUS_MINUS)"); break;
+                    case TK_ADD_EQU: printf(" (ADD_EQU)"); break;
+                    case TK_SUB_EQU: printf(" (SUB_EQU)"); break;
+                    case TK_MUL_EQU: printf(" (MUL_EQU)"); break;
+                    case TK_DIV_EQU: printf(" (DIV_EQU)"); break;
+                    case TK_MOD_EQU: printf(" (MOD_EQU)"); break;
+                    case TK_AND_EQU: printf(" (AND_EQU)"); break;
+                    case TK_OR_EQU: printf(" (OR_EQU)"); break;
+                    case TK_XOR_EQU: printf(" (XOR_EQU)"); break;
+                    case TK_DOT_DOT: printf(" (DOT_DOT)"); break;
+                    case TK_DBL_COLON: printf(" (DBL_COLON)"); break;
+                    case TK_ASM: printf(" (ASM)"); break;
+                    case TK_REG: printf(" (REG)"); break;
+                    case TK_NOREG: printf(" (NOREG)"); break;
+                    case TK_TRY: printf(" (TRY)"); break;
+                    case TK_CATCH: printf(" (CATCH)"); break;
+                    case TK_THROW: printf(" (THROW)"); break;
+                    case TK_AUTO: printf(" (AUTO)"); break;
+                    case TK_TRUE: printf(" (TRUE)"); break;
+                    case TK_FALSE: printf(" (FALSE)"); break;
+                    case TK_PUBLIC: printf(" (PUBLIC)"); break;
+                    case TK_CLASS: printf(" (CLASS)"); break;
+                    case TK_UNION: printf(" (UNION)"); break;
+                    case TK_EXTERN: printf(" (EXTERN)"); break;
+                    case TK_IMPORT: printf(" (IMPORT)"); break;
+                    case TK_LASTCLASS: printf(" (LASTCLASS)"); break;
+                    case TK_NO_WARN: printf(" (NO_WARN)"); break;
+                    case TK_INTERRUPT: printf(" (INTERRUPT)"); break;
+                    case TK_HASERRCODE: printf(" (HASERRCODE)"); break;
+                    case TK_ARGPOP: printf(" (ARGPOP)"); break;
+                    case TK_NOARGPOP: printf(" (NOARGPOP)"); break;
+                    case TK_SWITCH: printf(" (SWITCH)"); break;
+                    case TK_CASE: printf(" (CASE)"); break;
+                    case TK_DEFAULT: printf(" (DEFAULT)"); break;
+                    case TK_BREAK: printf(" (BREAK)"); break;
+                    case TK_CONTINUE: printf(" (CONTINUE)"); break;
+                    case TK_GOTO: printf(" (GOTO)"); break;
+                    case TK_START: printf(" (START)"); break;
+                    case TK_END: printf(" (END)"); break;
+                    case TK_DO: printf(" (DO)"); break;
+                    case TK_IFDEF: printf(" (IFDEF)"); break;
+                    case TK_IFNDEF: printf(" (IFNDEF)"); break;
+                    case TK_ENDIF: printf(" (ENDIF)"); break;
+                    case TK_DEFINE: printf(" (DEFINE)"); break;
+                    case TK_INCLUDE: printf(" (INCLUDE)"); break;
+                    default: 
+                        if (current_token < 256) {
+                            printf(" (CHAR: '%c')", (char)current_token);
+                        } else {
+                            printf(" (UNKNOWN: %d)", current_token);
+                        }
+                        break;
+                }
+                
+                printf(" [Line: %lld, Col: %lld]\n", lexer->token_line, lexer->token_column);
+                
+                /* Safety check - prevent infinite loops */
+                if (token_count > 1000) {
+                    printf("ERROR: Too many tokens (>1000), possible infinite loop\n");
+                    break;
+                }
+                
+                /* Get next token */
+                current_token = lex_next_token(lexer);
+            }
+            
+            printf("\n=== Tokenization Complete ===\n");
+            printf("Total tokens: %d\n", token_count);
+            printf("Final token: %d (EOF)\n", current_token);
+            
+            /* Cleanup and exit */
+            lexer_free(lexer);
+            fclose(input);
+            debug_system_cleanup();
+            return 0;
+        }
         
         /* Lexer is ready for parser */
-        printf("DEBUG: main - lexer ready for parser\n");
+        DEBUG_LEXER(DEBUG_VERBOSE, "Lexer ready for parser");
         
         /* Create parser */
-        printf("DEBUG: main - about to create parser\n");
+        DEBUG_PARSER(DEBUG_VERBOSE, "Creating parser");
         ParserState *parser = parser_new(lexer, cc);
         if (parser) {
-            printf("✓ Parser created successfully\n");
+            DEBUG_PARSER(DEBUG_INFO, "✓ Parser created successfully");
             
             /* Parse the program */
-            printf("DEBUG: main - about to parse program\n");
+            DEBUG_PARSER(DEBUG_VERBOSE, "Parsing program");
             ASTNode *ast = parse_program(parser);
             if (ast) {
-                printf("✓ AST generated successfully\n");
-                printf("  - Root node type: %d\n", ast->type);
+                DEBUG_PARSER(DEBUG_INFO, "✓ AST generated successfully");
+                DEBUG_PARSER(DEBUG_VERBOSE, "  - Root node type: %d", ast->type);
+                
                 /* Count children */
                 int child_count = 0;
                 ASTNode *child = ast->children;
@@ -109,26 +274,44 @@ int main(int argc, char *argv[]) {
                     child_count++;
                     child = child->next;
                 }
-                printf("  - Number of children: %d\n", child_count);
+                DEBUG_PARSER(DEBUG_VERBOSE, "  - Number of children: %d", child_count);
+                
+                /* Print AST statistics */
+                debug_ast_print_statistics(ast);
+                
+                /* Print AST if verbose */
+                if (g_debug_ctx && g_debug_ctx->level >= DEBUG_VERBOSE) {
+                    DEBUG_AST(DEBUG_VERBOSE, "AST Structure:");
+                    debug_ast_print(ast, 0);
+                }
+                
+                /* Print symbol table if verbose */
+                if (g_debug_ctx && g_debug_ctx->level >= DEBUG_VERBOSE) {
+                    debug_symbol_table_print(parser);
+                    debug_symbol_table_print_statistics(parser);
+                }
                 
                 /* Generate MASM Assembly Output */
-                printf("\n=== MASM Assembly Output Generation ===\n");
+                DEBUG_MASM(DEBUG_INFO, "=== MASM Assembly Output Generation ===");
                 MASMContext *masm_ctx = masm_context_new(NULL);
                 if (masm_ctx) {
-                    printf("✓ MASM context created successfully\n");
+                    DEBUG_MASM(DEBUG_INFO, "✓ MASM context created successfully");
                     
                     /* Generate MASM assembly from AST */
                     if (masm_generate_assembly_from_ast(masm_ctx, ast, "output.asm")) {
-                        printf("✓ MASM assembly file generated successfully\n");
-                        printf("  - Output file: output.asm\n");
-                        printf("  - File size: %zu bytes\n", masm_ctx->output_size);
+                        DEBUG_MASM(DEBUG_INFO, "✓ MASM assembly file generated successfully");
+                        DEBUG_MASM(DEBUG_VERBOSE, "  - Output file: output.asm");
+                        DEBUG_MASM(DEBUG_VERBOSE, "  - File size: %zu bytes", masm_ctx->output_size);
+                        
+                        /* Print debug info */
+                        masm_print_debug_info(masm_ctx);
                     } else {
-                        printf("✗ Failed to generate MASM assembly file\n");
+                        DEBUG_ERROR(DEBUG_CAT_MASM, "✗ Failed to generate MASM assembly file");
                     }
                     
                     masm_context_free(masm_ctx);
                 } else {
-                    printf("✗ Failed to create MASM context\n");
+                    DEBUG_ERROR(DEBUG_CAT_MASM, "✗ Failed to create MASM context");
                 }
                 
                 /* Direct AST-to-Assembly Conversion (NEW PATH) */
@@ -232,33 +415,14 @@ int main(int argc, char *argv[]) {
                     printf("✗ Failed to create intermediate code context\n");
                 }
                 
-                /* AOT Compilation to Executable */
-                printf("\n=== AOT Compilation to Executable ===\n");
-                AssemblyContext *aot_asm_ctx = assembly_context_new(cc, NULL, parser);
-                if (aot_asm_ctx) {
-                    printf("✓ AOT Assembly context created successfully\n");
-                    
-                    /* Create AOT context */
-                    AOTContext *aot_ctx = aot_context_new(cc, aot_asm_ctx);
-                    if (aot_ctx) {
-                        printf("✓ AOT context created successfully\n");
-                        
-                        /* Compile to executable */
-                        if (aot_compile_to_executable(aot_ctx, "test_pe_output.exe")) {
-                            printf("✓ AOT compilation to executable successful\n");
-                            printf("  - Output file: test_pe_output.exe\n");
-                        } else {
-                            printf("✗ AOT compilation to executable failed\n");
-                        }
-                        
-                        aot_context_free(aot_ctx);
-                    } else {
-                        printf("✗ Failed to create AOT context\n");
-                    }
-                    
-                    assembly_context_free(aot_asm_ctx);
+                /* MASM Toolchain Compilation to Executable */
+                printf("\n=== MASM Toolchain Compilation to Executable ===\n");
+                char *exe_filename = output_file ? output_file : "test_masm_output.exe";
+                if (compile_with_masm_toolchain(ast, exe_filename)) {
+                    printf("✓ MASM toolchain compilation successful\n");
+                    printf("  - Output file: %s\n", exe_filename);
                 } else {
-                    printf("✗ Failed to create AOT assembly context\n");
+                    printf("✗ MASM toolchain compilation failed\n");
                 }
                 
                 /* Free AST */
@@ -301,6 +465,14 @@ int main(int argc, char *argv[]) {
         printf("✓ MASM output generation test passed!\n");
     } else {
         printf("✗ MASM output generation test failed!\n");
+    }
+    
+    /* Cleanup debug system */
+    debug_system_cleanup();
+    
+    /* Cleanup debug options */
+    if (debug_options) {
+        debug_options_free(debug_options);
     }
     
     return 0;
@@ -907,6 +1079,85 @@ Bool test_masm_output_generation(void) {
     masm_context_free(masm_ctx);
     
     printf("✓ MASM output generation test passed!\n");
+    return true;
+}
+
+/*
+ * Compile using MASM toolchain approach
+ */
+Bool compile_with_masm_toolchain(ASTNode *ast, const char *output_filename) {
+    if (!ast || !output_filename) return false;
+    
+    printf("\n=== MASM Toolchain Compilation ===\n");
+    
+    /* Create MASM context */
+    AssemblyContext *asm_ctx = assembly_context_new(NULL, NULL, NULL);
+    if (!asm_ctx) {
+        printf("✗ Failed to create assembly context\n");
+        return false;
+    }
+    
+    MASMContext *masm_ctx = masm_context_new(asm_ctx);
+    if (!masm_ctx) {
+        printf("✗ Failed to create MASM context\n");
+        assembly_context_free(asm_ctx);
+        return false;
+    }
+    
+    /* Generate MASM assembly */
+    const char *asm_filename = "output.asm";
+    if (!masm_generate_assembly_from_ast(masm_ctx, ast, asm_filename)) {
+        printf("✗ Failed to generate MASM assembly\n");
+        masm_context_free(masm_ctx);
+        assembly_context_free(asm_ctx);
+        return false;
+    }
+    
+    printf("✓ MASM assembly generated: %s\n", asm_filename);
+    
+    /* Assemble with MASM */
+    char masm_cmd[512];
+    snprintf(masm_cmd, sizeof(masm_cmd), 
+        "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\ml64.exe\" /c /Cp /Cx /W3 /nologo %s",
+        asm_filename);
+    
+    printf("Running MASM: %s\n", masm_cmd);
+    char masm_powershell_cmd[1024];
+    snprintf(masm_powershell_cmd, sizeof(masm_powershell_cmd), "powershell -Command \"& %s\"", masm_cmd);
+    int masm_result = system(masm_powershell_cmd);
+    if (masm_result != 0) {
+        printf("✗ MASM assembly failed with code %d\n", masm_result);
+        masm_context_free(masm_ctx);
+        assembly_context_free(asm_ctx);
+        return false;
+    }
+    
+    printf("✓ MASM assembly successful\n");
+    
+    /* Link with Microsoft linker */
+    char link_cmd[512];
+    snprintf(link_cmd, sizeof(link_cmd),
+        "\"C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64\\link.exe\" /SUBSYSTEM:CONSOLE /ENTRY:main output.obj \"C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64\\kernel32.lib\" /OUT:%s",
+        output_filename);
+    
+    printf("Running Linker: %s\n", link_cmd);
+    char powershell_cmd[1024];
+    snprintf(powershell_cmd, sizeof(powershell_cmd), "powershell -Command \"& %s\"", link_cmd);
+    int link_result = system(powershell_cmd);
+    if (link_result != 0) {
+        printf("✗ Linking failed with code %d\n", link_result);
+        masm_context_free(masm_ctx);
+        assembly_context_free(asm_ctx);
+        return false;
+    }
+    
+    printf("✓ Linking successful\n");
+    printf("✓ Executable created: %s\n", output_filename);
+    
+    /* Cleanup */
+    masm_context_free(masm_ctx);
+    assembly_context_free(asm_ctx);
+    
     return true;
 }
 

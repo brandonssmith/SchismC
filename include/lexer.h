@@ -68,6 +68,8 @@ typedef enum {
     TK_CONTINUE,      /* continue */
     TK_RETURN,        /* return */
     TK_GOTO,          /* goto */
+    TK_START,         /* start (sub-switch) */
+    TK_END,           /* end (sub-switch) */
     
     /* Preprocessor */
     TK_IFDEF,         /* ifdef */
@@ -98,6 +100,7 @@ typedef enum {
     TK_CATCH,         /* catch */
     TK_THROW,         /* throw */
     TK_NO_WARN,       /* no_warn */
+    TK_AUTO,          /* auto (type inference) */
     
     /* Boolean literals */
     TK_TRUE,          /* true */
@@ -135,7 +138,7 @@ typedef enum {
     TK_TYPE_F64,      /* F64 (64-bit float) */
     TK_TYPE_BOOL,     /* Bool (boolean) */
     TK_TYPE_STRING    /* String (char*) */
-} TokenType;
+} SchismTokenType;
 
 /* Lexer state structure */
 typedef struct {
@@ -148,7 +151,7 @@ typedef struct {
     I64 buffer_column;       /* Current column number */
     
     /* Current token */
-    TokenType current_token; /* Current token type */
+    SchismTokenType current_token; /* Current token type */
     U8 *token_value;         /* Token string value */
     I64 token_length;        /* Token length */
     I64 token_line;          /* Token line number */
@@ -177,8 +180,8 @@ typedef struct {
 /* Function prototypes */
 LexerState* lexer_new(FILE *input);
 void lexer_free(LexerState *lexer);
-TokenType lex_next_token(LexerState *lexer);
-TokenType lex_peek_token(LexerState *lexer);
+SchismTokenType lex_next_token(LexerState *lexer);
+SchismTokenType lex_peek_token(LexerState *lexer);
 U8* lex_get_token_value(LexerState *lexer);
 I64 lex_get_token_line(LexerState *lexer);
 I64 lex_get_token_column(LexerState *lexer);
@@ -192,7 +195,7 @@ Bool lex_is_assembly_opcode(U8 *str);
 /* HolyC-specific functions */
 Bool lex_is_holyc_keyword(U8 *str);
 Bool lex_is_builtin_type(U8 *str);
-TokenType lex_get_builtin_type_token(U8 *str);
+SchismTokenType lex_get_builtin_type_token(U8 *str);
 
 /* Character classification */
 Bool lex_is_alpha(U8 c);

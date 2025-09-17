@@ -249,7 +249,7 @@ Bool opt_pass_3(ICGenContext *ctx) {
         if (ic->base.ic_code == IC_ASSIGN || ic->base.ic_code == IC_LOAD) {
             /* Allocate register for result */
             if (ctx->reg_count < MAX_X86_REGS) {
-                X86Register reg = (X86Register)(REG_RAX + ctx->reg_count);
+                X86Register reg = (X86Register)(X86_REG_RAX + ctx->reg_count);
                 ctx->allocated_regs[ctx->reg_count] = reg;
                 ctx->reg_count++;
                 

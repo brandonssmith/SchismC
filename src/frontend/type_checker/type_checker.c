@@ -11,8 +11,8 @@
 
 /* Type compatibility matrix */
 typedef struct {
-    TokenType from_type;
-    TokenType to_type;
+    SchismTokenType from_type;
+    SchismTokenType to_type;
     Bool is_compatible;
     Bool requires_coercion;
 } TypeCompatibility;
@@ -75,7 +75,7 @@ static TypeCompatibility type_compatibility_matrix[] = {
 };
 
 /* Get type name for debugging */
-const char* type_get_name(TokenType type) {
+const char* type_get_name(SchismTokenType type) {
     switch (type) {
         case TK_TYPE_I8: return "I8";
         case TK_TYPE_I16: return "I16";
@@ -94,7 +94,7 @@ const char* type_get_name(TokenType type) {
 }
 
 /* Check if two types are compatible */
-Bool type_is_compatible(TokenType from_type, TokenType to_type) {
+Bool type_is_compatible(SchismTokenType from_type, SchismTokenType to_type) {
     if (from_type == to_type) return true;
     
     for (I64 i = 0; type_compatibility_matrix[i].from_type != 0; i++) {
@@ -108,7 +108,7 @@ Bool type_is_compatible(TokenType from_type, TokenType to_type) {
 }
 
 /* Check if type conversion requires coercion */
-Bool type_requires_coercion(TokenType from_type, TokenType to_type) {
+Bool type_requires_coercion(SchismTokenType from_type, SchismTokenType to_type) {
     if (from_type == to_type) return false;
     
     for (I64 i = 0; type_compatibility_matrix[i].from_type != 0; i++) {
@@ -122,7 +122,7 @@ Bool type_requires_coercion(TokenType from_type, TokenType to_type) {
 }
 
 /* Get the result type for a binary operation */
-TokenType type_get_binary_result_type(TokenType left_type, TokenType right_type, BinaryOpType op) {
+SchismTokenType type_get_binary_result_type(SchismTokenType left_type, SchismTokenType right_type, BinaryOpType op) {
     /* Arithmetic operations */
     if (op == BINOP_ADD || op == BINOP_SUB || op == BINOP_MUL || op == BINOP_DIV || op == BINOP_MOD) {
         /* If either operand is float, result is float */
@@ -166,7 +166,7 @@ TokenType type_get_binary_result_type(TokenType left_type, TokenType right_type,
 }
 
 /* Validate assignment compatibility */
-Bool type_validate_assignment(TokenType left_type, TokenType right_type) {
+Bool type_validate_assignment(SchismTokenType left_type, SchismTokenType right_type) {
     if (type_is_compatible(right_type, left_type)) {
         return true;
     }
@@ -177,7 +177,7 @@ Bool type_validate_assignment(TokenType left_type, TokenType right_type) {
 }
 
 /* Validate binary operation compatibility */
-Bool type_validate_binary_operation(TokenType left_type, TokenType right_type, BinaryOpType op) {
+Bool type_validate_binary_operation(SchismTokenType left_type, SchismTokenType right_type, BinaryOpType op) {
     /* Logical operations require boolean operands */
     if (op == BINOP_AND_AND || op == BINOP_OR_OR) {
         if (left_type != TK_TYPE_BOOL || right_type != TK_TYPE_BOOL) {
@@ -214,7 +214,7 @@ Bool type_validate_binary_operation(TokenType left_type, TokenType right_type, B
 }
 
 /* Get the type of an AST node */
-TokenType type_get_ast_node_type(ASTNode *node) {
+SchismTokenType type_get_ast_node_type(ASTNode *node) {
     if (!node) return 0;
     
     switch (node->type) {
@@ -230,7 +230,7 @@ TokenType type_get_ast_node_type(ASTNode *node) {
         case NODE_VARIABLE:
             /* Get type from variable declaration */
             if (node->data.identifier.type) {
-                return (TokenType)(I64)node->data.identifier.type;
+                return (SchismTokenType)(I64)node->data.identifier.type;
             }
             return TK_TYPE_I64; /* Default */
         case NODE_BINARY_OP:
@@ -246,8 +246,27 @@ TokenType type_get_ast_node_type(ASTNode *node) {
         case NODE_CALL:
             /* Function call returns the function's return type */
             if (node->data.call.return_type) {
-                return (TokenType)(I64)node->data.call.return_type;
+                return (SchismTokenType)(I64)node->data.call.return_type;
             }
+            return TK_TYPE_I64; /* Default */
+        case NODE_SUB_INT_ACCESS:
+            /* Sub-int access returns the member type */
+            {
+                U8 *member_type = node->data.sub_int_access.member_type;
+                if (member_type) {
+                    if (strcmp(member_type, "i8") == 0) return TK_TYPE_I8;
+                    if (strcmp(member_type, "u8") == 0) return TK_TYPE_U8;
+                    if (strcmp(member_type, "i16") == 0) return TK_TYPE_I16;
+                    if (strcmp(member_type, "u16") == 0) return TK_TYPE_U16;
+                    if (strcmp(member_type, "i32") == 0) return TK_TYPE_I32;
+                    if (strcmp(member_type, "u32") == 0) return TK_TYPE_U32;
+                }
+            }
+            return TK_TYPE_I64; /* Default */
+        case NODE_UNION_MEMBER_ACCESS:
+            /* Union member access - type depends on the member */
+            /* For now, return a default type - this would need to be enhanced
+               to look up the actual member type from the union definition */
             return TK_TYPE_I64; /* Default */
         default:
             return TK_TYPE_I64; /* Default type */
@@ -262,8 +281,8 @@ Bool type_check_ast_node(ASTNode *node) {
         case NODE_ASSIGNMENT:
             /* Check assignment compatibility */
             {
-                TokenType left_type = type_get_ast_node_type(node->data.assignment.left);
-                TokenType right_type = type_get_ast_node_type(node->data.assignment.right);
+                SchismTokenType left_type = type_get_ast_node_type(node->data.assignment.left);
+                SchismTokenType right_type = type_get_ast_node_type(node->data.assignment.right);
                 
                 if (!type_validate_assignment(left_type, right_type)) {
                     return false;
@@ -274,8 +293,8 @@ Bool type_check_ast_node(ASTNode *node) {
         case NODE_BINARY_OP:
             /* Check binary operation compatibility */
             {
-                TokenType left_type = type_get_ast_node_type(node->data.binary_op.left);
-                TokenType right_type = type_get_ast_node_type(node->data.binary_op.right);
+                SchismTokenType left_type = type_get_ast_node_type(node->data.binary_op.left);
+                SchismTokenType right_type = type_get_ast_node_type(node->data.binary_op.right);
                 
                 if (!type_validate_binary_operation(left_type, right_type, node->data.binary_op.op)) {
                     return false;
@@ -286,10 +305,78 @@ Bool type_check_ast_node(ASTNode *node) {
         case NODE_VARIABLE:
             /* Check variable initialization */
             if (node->data.variable.initializer) {
-                TokenType var_type = (TokenType)(I64)node->data.variable.type;
-                TokenType init_type = type_get_ast_node_type(node->data.variable.initializer);
+                SchismTokenType var_type = (SchismTokenType)(I64)node->data.variable.type;
+                SchismTokenType init_type = type_get_ast_node_type(node->data.variable.initializer);
                 
                 if (!type_validate_assignment(var_type, init_type)) {
+                    return false;
+                }
+            }
+            break;
+            
+        case NODE_SUB_INT_ACCESS:
+            /* Check sub-int access */
+            {
+                /* Validate that the base object exists and is accessible */
+                if (!node->data.sub_int_access.base_object) {
+                    printf("ERROR: Sub-int access missing base object\n");
+                    return false;
+                }
+                
+                /* Validate that the index expression is valid */
+                if (!node->data.sub_int_access.index) {
+                    printf("ERROR: Sub-int access missing index expression\n");
+                    return false;
+                }
+                
+                /* Check that the index is an integer type */
+                SchismTokenType index_type = type_get_ast_node_type(node->data.sub_int_access.index);
+                if (index_type != TK_TYPE_I8 && index_type != TK_TYPE_I16 && 
+                    index_type != TK_TYPE_I32 && index_type != TK_TYPE_I64 &&
+                    index_type != TK_TYPE_U8 && index_type != TK_TYPE_U16 && 
+                    index_type != TK_TYPE_U32 && index_type != TK_TYPE_U64) {
+                    printf("ERROR: Sub-int access index must be an integer type\n");
+                    return false;
+                }
+                
+                /* Validate member type */
+                U8 *member_type = node->data.sub_int_access.member_type;
+                if (!member_type) {
+                    printf("ERROR: Sub-int access missing member type\n");
+                    return false;
+                }
+                
+                /* Check bounds based on member size */
+                I64 member_size = node->data.sub_int_access.member_size;
+                if (member_size <= 0) {
+                    printf("ERROR: Invalid member size for sub-int access\n");
+                    return false;
+                }
+            }
+            break;
+            
+        case NODE_UNION_MEMBER_ACCESS:
+            /* Check union member access */
+            {
+                /* Validate that the union object exists */
+                if (!node->data.union_member_access.union_object) {
+                    printf("ERROR: Union member access missing union object\n");
+                    return false;
+                }
+                
+                /* Validate that the index expression is valid */
+                if (!node->data.union_member_access.index) {
+                    printf("ERROR: Union member access missing index expression\n");
+                    return false;
+                }
+                
+                /* Check that the index is an integer type */
+                SchismTokenType index_type = type_get_ast_node_type(node->data.union_member_access.index);
+                if (index_type != TK_TYPE_I8 && index_type != TK_TYPE_I16 && 
+                    index_type != TK_TYPE_I32 && index_type != TK_TYPE_I64 &&
+                    index_type != TK_TYPE_U8 && index_type != TK_TYPE_U16 && 
+                    index_type != TK_TYPE_U32 && index_type != TK_TYPE_U64) {
+                    printf("ERROR: Union member access index must be an integer type\n");
                     return false;
                 }
             }

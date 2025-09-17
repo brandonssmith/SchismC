@@ -28,11 +28,15 @@ SOURCES = $(wildcard $(SRCDIR)/*.c) \
 # Object files
 OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 
-# Target executable
+# Target executables
 TARGET = $(BINDIR)/schismc.exe
+TEST_TARGET = $(BINDIR)/test_runner.exe
 
 # Default target
 all: $(TARGET)
+
+# Test runner target
+test_runner: $(TEST_TARGET)
 
 # Create directories
 $(OBJDIR):
@@ -82,6 +86,12 @@ debug: $(TARGET)
 release: CFLAGS += -DNDEBUG -O3
 release: clean $(TARGET)
 
+# Test runner build
+$(TEST_TARGET): test_runner.c $(OBJECTS)
+	@echo "Building test runner..."
+	$(CC) $(CFLAGS) $(INCLUDES) -o $@ $< $(OBJECTS)
+	@echo "Test runner built successfully: $@"
+
 # Help target
 help:
 	@echo "SchismC Build System"
@@ -92,7 +102,8 @@ help:
 	@echo "  debug    - Build with debug symbols"
 	@echo "  release  - Build optimized release"
 	@echo "  test     - Run test programs"
+	@echo "  test_runner - Build test runner"
 	@echo "  install  - Install to system path"
 	@echo "  help     - Show this help"
 
-.PHONY: all clean install test debug release help
+.PHONY: all clean install test debug release help test_runner

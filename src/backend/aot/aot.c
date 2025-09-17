@@ -7,7 +7,6 @@
 #include "aot.h"
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 /*
  * AOT Context Management
@@ -17,20 +16,22 @@ AOTContext* aot_context_new(CCmpCtrl *cc, AssemblyContext *asm_ctx) {
     AOTContext *ctx = malloc(sizeof(AOTContext));
     if (!ctx) return NULL;
     
+    /* Initialize all fields to zero first */
     memset(ctx, 0, sizeof(AOTContext));
     ctx->cc = cc;
     ctx->asm_ctx = asm_ctx;
     
     /* Initialize AOT state */
-    ctx->aot = aot_new();
+    ctx->aot = malloc(sizeof(CAOT));
     if (!ctx->aot) {
         free(ctx);
         return NULL;
     }
+    memset(ctx->aot, 0, sizeof(CAOT));
     
     ctx->aotc = malloc(sizeof(CAOTCtrl));
     if (!ctx->aotc) {
-        aot_free(ctx->aot);
+        free(ctx->aot);
         free(ctx);
         return NULL;
     }
@@ -46,7 +47,7 @@ AOTContext* aot_context_new(CCmpCtrl *cc, AssemblyContext *asm_ctx) {
     ctx->pe_sections = malloc(ctx->num_sections * sizeof(PESectionHeader));
     if (!ctx->pe_sections) {
         free(ctx->aotc);
-        aot_free(ctx->aot);
+        free(ctx->aot);
         free(ctx);
         return NULL;
     }
@@ -57,7 +58,7 @@ AOTContext* aot_context_new(CCmpCtrl *cc, AssemblyContext *asm_ctx) {
     if (!ctx->binary_buffer) {
         free(ctx->pe_sections);
         free(ctx->aotc);
-        aot_free(ctx->aot);
+        free(ctx->aot);
         free(ctx);
         return NULL;
     }
@@ -73,7 +74,7 @@ void aot_context_free(AOTContext *ctx) {
     if (ctx->binary_buffer) free(ctx->binary_buffer);
     if (ctx->pe_sections) free(ctx->pe_sections);
     if (ctx->aotc) free(ctx->aotc);
-    if (ctx->aot) aot_free(ctx->aot);
+    if (ctx->aot) free(ctx->aot);
     
     free(ctx);
 }
@@ -235,9 +236,9 @@ Bool aot_generate_pe_header(AOTContext *ctx) {
     if (!ctx) return false;
     
     printf("DEBUG: aot_generate_pe_header - starting\n");
-    printf("DEBUG: Generating PE headers for Windows executable\n");
+    printf("DEBUG: Generating minimal PE headers for Windows executable\n");
     
-    /* Generate DOS stub */
+    /* Generate proper DOS stub (128 bytes) with correct PE signature offset */
     U8 dos_stub[] = {
         0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
         0xFF, 0xFF, 0x00, 0x00, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -252,6 +253,12 @@ Bool aot_generate_pe_header(AOTContext *ctx) {
         0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
     };
     
+    /* Verify DOS stub is exactly 128 bytes */
+    if (sizeof(dos_stub) != 128) {
+        printf("ERROR: DOS stub size mismatch: %zu bytes (expected 128)\n", sizeof(dos_stub));
+        return false;
+    }
+    
     /* Append DOS stub to binary */
     printf("DEBUG: Appending DOS stub (%zu bytes)\n", sizeof(dos_stub));
     if (!aot_append_binary(ctx, dos_stub, sizeof(dos_stub))) {
@@ -260,81 +267,70 @@ Bool aot_generate_pe_header(AOTContext *ctx) {
     }
     printf("DEBUG: DOS stub appended successfully\n");
     
-    /* Generate PE COFF header */
+    /* Generate PE COFF header for 32-bit */
     memset(&ctx->pe_header, 0, sizeof(PECOFFHeader));
-    ctx->pe_header.machine = 0x8664;  /* x64 (64-bit) */
+    ctx->pe_header.machine = 0x014C;  /* x86 (32-bit) */
     ctx->pe_header.num_sections = ctx->num_sections;
-    ctx->pe_header.time_stamp = 0;  /* TODO: Get current timestamp */
+    ctx->pe_header.time_stamp = 0;
     ctx->pe_header.size_of_optional_header = sizeof(PEOptionalHeader);
-    ctx->pe_header.characteristics = 0x22;  /* EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE (x64) */
+    ctx->pe_header.characteristics = 0x0102;  /* EXECUTABLE_IMAGE | 32BIT_MACHINE */
     
-    /* Generate PE optional header */
+    /* Generate PE optional header for 32-bit */
     memset(&ctx->pe_optional, 0, sizeof(PEOptionalHeader));
-    ctx->pe_optional.magic = 0x020B;  /* PE32+ (64-bit) */
-    ctx->pe_optional.major_linker_version = 14;  /* Visual Studio 2015+ */
+    ctx->pe_optional.magic = 0x010B;  /* PE32 (32-bit) */
+    ctx->pe_optional.major_linker_version = 14;
     ctx->pe_optional.minor_linker_version = 0;
-    ctx->pe_optional.size_of_code = 0;  /* Will be calculated */
-    ctx->pe_optional.size_of_initialized_data = 0;  /* Will be calculated */
+    ctx->pe_optional.size_of_code = 0;
+    ctx->pe_optional.size_of_initialized_data = 0;
     ctx->pe_optional.size_of_uninitialized_data = 0;
-    ctx->pe_optional.address_of_entry_point = 0x1000;  /* Entry point in .text section */
-    ctx->pe_optional.base_of_code = 0x1000;  /* Base of code section */
-    ctx->pe_optional.image_base = 0x140000000;  /* Default image base for x64 */
-    ctx->pe_optional.section_alignment = 0x1000;  /* 4KB alignment */
-    ctx->pe_optional.file_alignment = 0x200;  /* 512 byte alignment */
-    ctx->pe_optional.major_os_version = 6;  /* Windows Vista+ */
+    ctx->pe_optional.address_of_entry_point = 0x1000;  /* Will be updated later */
+    ctx->pe_optional.base_of_code = 0x1000;
+    ctx->pe_optional.image_base = 0x400000;  /* Default image base for x86 */
+    ctx->pe_optional.section_alignment = 0x1000;
+    ctx->pe_optional.file_alignment = 0x200;
+    ctx->pe_optional.major_os_version = 6;
     ctx->pe_optional.minor_os_version = 0;
     ctx->pe_optional.major_image_version = 1;
     ctx->pe_optional.minor_image_version = 0;
     ctx->pe_optional.major_subsystem_version = 6;
     ctx->pe_optional.minor_subsystem_version = 0;
     ctx->pe_optional.win32_version_value = 0;
-    ctx->pe_optional.size_of_image = 0;  /* Will be calculated */
-    ctx->pe_optional.size_of_headers = 0;  /* Will be calculated */
-    ctx->pe_optional.checksum = 0;  /* Will be calculated */
+    ctx->pe_optional.size_of_image = 0;
+    ctx->pe_optional.size_of_headers = 0;
+    ctx->pe_optional.checksum = 0;
     ctx->pe_optional.subsystem = PE_SUBSYSTEM_CONSOLE;
     ctx->pe_optional.dll_characteristics = 0;
-    ctx->pe_optional.size_of_stack_reserve = 0x100000;  /* 1MB stack */
-    ctx->pe_optional.size_of_stack_commit = 0x4000;  /* 16KB initial stack */
-    ctx->pe_optional.size_of_heap_reserve = 0x1000000;  /* 16MB heap */
-    ctx->pe_optional.size_of_heap_commit = 0x10000;  /* 64KB initial heap */
+    ctx->pe_optional.size_of_stack_reserve = 0x100000;
+    ctx->pe_optional.size_of_stack_commit = 0x4000;
+    ctx->pe_optional.size_of_heap_reserve = 0x1000000;
+    ctx->pe_optional.size_of_heap_commit = 0x10000;
     ctx->pe_optional.loader_flags = 0;
-    ctx->pe_optional.num_rva_and_sizes = 16;  /* Standard number of data directories */
+    ctx->pe_optional.num_rva_and_sizes = 16;
     
     /* Append PE signature to binary */
     U32 pe_signature = 0x00004550;  /* "PE\0\0" */
+    printf("DEBUG: Appending PE signature: 0x%08X\n", pe_signature);
     if (!aot_append_binary(ctx, (U8*)&pe_signature, sizeof(U32))) {
+        printf("ERROR: Failed to append PE signature\n");
         return false;
     }
     
     /* Append COFF header to binary */
+    printf("DEBUG: Appending COFF header (%zu bytes)\n", sizeof(PECOFFHeader));
     if (!aot_append_binary(ctx, (U8*)&ctx->pe_header, sizeof(PECOFFHeader))) {
+        printf("ERROR: Failed to append COFF header\n");
         return false;
     }
     
     /* Append optional header to binary */
+    printf("DEBUG: Appending optional header (%zu bytes)\n", sizeof(PEOptionalHeader));
     if (!aot_append_binary(ctx, (U8*)&ctx->pe_optional, sizeof(PEOptionalHeader))) {
+        printf("ERROR: Failed to append optional header\n");
         return false;
     }
     
-    /* Append data directories with import table - simplified */
-    U32 data_directories[32] = {
-        0, 0,                    /* Export table */
-        0x5000, 0x400,          /* Import table - RVA 0x5000, size 0x400 */
-        0, 0,                    /* Resource table */
-        0, 0,                    /* Exception table */
-        0, 0,                    /* Certificate table */
-        0, 0,                    /* Base relocation table */
-        0, 0,                    /* Debug */
-        0, 0,                    /* Architecture */
-        0, 0,                    /* Global pointer */
-        0, 0,                    /* TLS table */
-        0, 0,                    /* Load config table */
-        0, 0,                    /* Bound import */
-        0x5100, 0x200,          /* IAT - Import Address Table */
-        0, 0,                    /* Delay import descriptor */
-        0, 0,                    /* CLR runtime header */
-        0, 0                     /* Reserved */
-    };
+    /* Append minimal data directories */
+    U32 data_directories[32] = {0};  /* All zeros for now */
     
     printf("DEBUG: Appending data directories (%zu bytes)\n", sizeof(data_directories));
     if (!aot_append_binary(ctx, (U8*)&data_directories, sizeof(data_directories))) {
@@ -342,6 +338,7 @@ Bool aot_generate_pe_header(AOTContext *ctx) {
         return false;
     }
     
+    printf("DEBUG: PE headers generated successfully\n");
     return true;
 }
 
@@ -523,82 +520,85 @@ Bool aot_generate_relocations(AOTContext *ctx) {
  * Binary Output
  */
 
-Bool aot_write_binary(AOTContext *ctx, const char *filename) {
-    if (!ctx || !filename) return false;
-    
-    printf("DEBUG: Creating file using Windows API: %s\n", filename);
-    fflush(stdout);
-    
-    /* Validate binary buffer and size */
-    if (!ctx->binary_buffer) {
-        fputs("ERROR: Binary buffer is NULL\n", stdout);
-        fflush(stdout);
-        return false;
-    }
-    
-    if (ctx->binary_size <= 0) {
-        fputs("ERROR: Invalid binary size\n", stdout);
-        fflush(stdout);
-        return false;
-    }
-    
-    if (ctx->binary_size > 0xFFFFFFFF) {  /* Sanity check - 4GB max (DWORD limit) */
-        printf("ERROR: Binary size too large: %lld bytes (max: 4GB)\n", ctx->binary_size);
-        fflush(stdout);
-        return false;
-    }
-    
-    printf("DEBUG: Binary buffer validation passed - size: %lld, buffer: %p\n", ctx->binary_size, (void*)ctx->binary_buffer);
-    fflush(stdout);
-    
-    /* Use simple file writing approach */
-    FILE *file = fopen(filename, "wb");
-    if (!file) {
-        printf("ERROR: Failed to create file '%s'\n", filename);
-        fflush(stdout);
-        return false;
-    }
-    
-    size_t bytes_written = fwrite(ctx->binary_buffer, 1, ctx->binary_size, file);
-    fclose(file);
-    
-    if (bytes_written != ctx->binary_size) {
-        printf("ERROR: Wrote %zu bytes, expected %lld\n", bytes_written, ctx->binary_size);
-        fflush(stdout);
-        return false;
-    }
-    
-    printf("DEBUG: Successfully wrote %zu bytes to file\n", bytes_written);
-    fflush(stdout);
-    return true;
-}
+/* aot_write_binary function is now in windows_io.c */
 
 Bool aot_append_binary(AOTContext *ctx, const U8 *data, I64 size) {
-    if (!ctx || !data || size <= 0) return false;
+    if (!ctx || !data) {
+        printf("ERROR: aot_append_binary - invalid parameters\n");
+        return false;
+    }
+    
+    /* Enhanced size validation */
+    if (size <= 0) {
+        printf("ERROR: aot_append_binary - invalid size: %lld\n", size);
+        return false;
+    }
+    
+    /* Check for reasonable size limits to prevent memory exhaustion */
+    if (size > 100000000) {  /* 100MB limit */
+        printf("ERROR: aot_append_binary - size too large: %lld bytes\n", size);
+        return false;
+    }
     
     printf("DEBUG: aot_append_binary - appending %lld bytes (current size: %lld, capacity: %lld)\n", 
            size, ctx->binary_size, ctx->binary_capacity);
     
+    /* Validate current state */
+    if (ctx->binary_size < 0 || ctx->binary_capacity <= 0) {
+        printf("ERROR: aot_append_binary - invalid context state\n");
+        return false;
+    }
+    
     /* Check if we need to expand buffer */
     if (ctx->binary_size + size > ctx->binary_capacity) {
         printf("DEBUG: aot_append_binary - expanding buffer\n");
-        I64 new_capacity = ctx->binary_capacity * 2;
+        
+        /* Calculate new capacity with overflow protection */
+        I64 new_capacity = ctx->binary_capacity;
         while (new_capacity < ctx->binary_size + size) {
+            if (new_capacity > 1000000000) {  /* 1GB limit */
+                printf("ERROR: aot_append_binary - buffer size limit exceeded\n");
+                return false;
+            }
             new_capacity *= 2;
         }
         
+        printf("DEBUG: aot_append_binary - expanding to %lld bytes\n", new_capacity);
         U8 *new_buffer = realloc(ctx->binary_buffer, new_capacity);
-        if (!new_buffer) return false;
+        if (!new_buffer) {
+            printf("ERROR: aot_append_binary - realloc failed\n");
+            return false;
+        }
         
         ctx->binary_buffer = new_buffer;
         ctx->binary_capacity = new_capacity;
     }
     
-    /* Append data */
-    printf("DEBUG: aot_append_binary - copying data\n");
-    memcpy(ctx->binary_buffer + ctx->binary_size, data, size);
+    /* Final bounds check after potential expansion */
+    if (ctx->binary_size + size > ctx->binary_capacity) {
+        printf("ERROR: Buffer overflow detected after expansion! size=%lld, capacity=%lld\n", 
+               ctx->binary_size + size, ctx->binary_capacity);
+        return false;
+    }
+    
+    /* Ensure size is within reasonable bounds for memcpy */
+    if (size > SIZE_MAX) {
+        printf("ERROR: Size too large for memcpy: %lld\n", size);
+        return false;
+    }
+    
+    /* Validate buffer pointer */
+    if (!ctx->binary_buffer) {
+        printf("ERROR: aot_append_binary - binary_buffer is NULL\n");
+        return false;
+    }
+    
+    /* Safe memcpy with bounds validation */
+    printf("DEBUG: aot_append_binary - copying %lld bytes to offset %lld\n", size, ctx->binary_size);
+    memcpy(ctx->binary_buffer + ctx->binary_size, data, (size_t)size);
     ctx->binary_size += size;
-    printf("DEBUG: aot_append_binary - completed successfully\n");
+    
+    printf("DEBUG: aot_append_binary - completed successfully (new size: %lld)\n", ctx->binary_size);
     
     return true;
 }
@@ -774,9 +774,9 @@ Bool aot_compile_to_executable(AOTContext *ctx, const char *output_filename) {
     fflush(stdout);
     
     /* Write binary to file */
-    fputs("DEBUG: About to call aot_write_binary\n", stdout);
+    fputs("DEBUG: About to call aot_write_binary_windows\n", stdout);
     fflush(stdout);
-    Bool result = aot_write_binary(ctx, output_filename);
+    Bool result = aot_write_binary_windows(ctx, output_filename);
     if (result) {
         fputs("DEBUG: Binary written successfully\n", stdout);
         fflush(stdout);
@@ -1145,16 +1145,14 @@ Bool aot_generate_windows_entry_point(AOTContext *ctx) {
      */
     
     U8 entry_point_code[] = {
-        /* main: (x64) */
-        0x48, 0x83, 0xEC, 0x28,        /* sub rsp, 40 (32-byte shadow space + 8 for alignment) */
-        0xE8, 0x00, 0x00, 0x00, 0x00,  /* call user_main (will be patched) */
-        0x48, 0x89, 0xC1,              /* mov rcx, rax (exit code in rcx for x64 calling convention) */
+        /* main: (x86 32-bit) */
+        0xE8, 0x00, 0x00, 0x00, 0x00,  /* call main (will be patched) */
+        0x50,                          /* push eax (save return value) */
         0xFF, 0x15, 0x00, 0x00, 0x00, 0x00,  /* call [ExitProcess] (will be patched) */
-        0x48, 0x83, 0xC4, 0x28,        /* add rsp, 40 */
         0xC3,                          /* ret */
         
-        /* user_main: (x64) */
-        0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x00,  /* mov rax, 0 (x64) */
+        /* main function: (x86 32-bit) */
+        0xB8, 0x2A, 0x00, 0x00, 0x00,  /* mov eax, 42 (return 42) */
         0xC3,                          /* ret */
         
         /* Padding to align to 16 bytes */

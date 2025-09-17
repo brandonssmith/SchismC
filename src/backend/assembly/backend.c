@@ -16,6 +16,7 @@ AssemblyContext* assembly_context_new(CCmpCtrl *cc, ICGenContext *ic_ctx, Parser
     AssemblyContext *ctx = malloc(sizeof(AssemblyContext));
     if (!ctx) return NULL;
     
+    /* Initialize all fields to zero first */
     memset(ctx, 0, sizeof(AssemblyContext));
     ctx->cc = cc;
     ctx->ic_ctx = ic_ctx;
@@ -28,6 +29,10 @@ AssemblyContext* assembly_context_new(CCmpCtrl *cc, ICGenContext *ic_ctx, Parser
         free(ctx);
         return NULL;
     }
+    
+    /* Initialize buffer to zero for safety */
+    memset(ctx->assembly_buffer, 0, ctx->buffer_capacity);
+    
     printf("DEBUG: Assembly context created with buffer_capacity=%lld\n", ctx->buffer_capacity);
     
     ctx->buffer_size = 0;
@@ -197,10 +202,10 @@ Bool asm_emit_immediate(AssemblyContext *ctx, I64 imm, I64 size) {
  */
 
 X86Register asm_allocate_register(AssemblyContext *ctx, I64 size) {
-    if (!ctx) return REG_NONE;
+    if (!ctx) return X86_REG_NONE;
     
     /* Simple register allocation - find first available register */
-    X86Register regs[] = {REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RSI, REG_RDI, REG_R8, REG_R9, REG_R10, REG_R11};
+    X86Register regs[] = {X86_REG_RAX, X86_REG_RCX, X86_REG_RDX, X86_REG_RBX, X86_REG_RSI, X86_REG_RDI, X86_REG_R8, X86_REG_R9, X86_REG_R10, X86_REG_R11};
     I64 reg_count = sizeof(regs) / sizeof(regs[0]);
     
     for (I64 i = 0; i < reg_count; i++) {
@@ -218,11 +223,11 @@ X86Register asm_allocate_register(AssemblyContext *ctx, I64 size) {
         return spilled;
     }
     
-    return REG_NONE;
+    return X86_REG_NONE;
 }
 
 void asm_free_register(AssemblyContext *ctx, X86Register reg) {
-    if (!ctx || reg == REG_NONE || reg >= MAX_X86_REGS) return;
+    if (!ctx || reg == X86_REG_NONE || reg >= MAX_X86_REGS) return;
     
     ctx->reg_in_use[reg] = false;
     
@@ -239,12 +244,12 @@ void asm_free_register(AssemblyContext *ctx, X86Register reg) {
 }
 
 Bool asm_is_register_allocated(AssemblyContext *ctx, X86Register reg) {
-    if (!ctx || reg == REG_NONE || reg >= MAX_X86_REGS) return false;
+    if (!ctx || reg == X86_REG_NONE || reg >= MAX_X86_REGS) return false;
     return ctx->reg_in_use[reg];
 }
 
 X86Register asm_spill_register(AssemblyContext *ctx, X86Register reg) {
-    if (!ctx || !asm_is_register_allocated(ctx, reg)) return REG_NONE;
+    if (!ctx || !asm_is_register_allocated(ctx, reg)) return X86_REG_NONE;
     
     /* Spill register to stack */
     I64 stack_offset = ctx->stack_offset;
@@ -254,7 +259,7 @@ X86Register asm_spill_register(AssemblyContext *ctx, X86Register reg) {
     CAsmArg stack_arg = {0};
     CAsmArg reg_arg = {0};
     
-    asm_setup_memory_arg(ctx, &stack_arg, REG_RSP, stack_offset);
+    asm_setup_memory_arg(ctx, &stack_arg, X86_REG_RSP, stack_offset);
     asm_setup_register_arg(ctx, &reg_arg, reg);
     
     asm_generate_mov(ctx, &stack_arg, &reg_arg);
@@ -479,8 +484,8 @@ Bool asm_needs_rex_prefix(CAsmArg *arg1, CAsmArg *arg2) {
     if (!arg1 && !arg2) return false;
     
     /* Check if any register is in the extended set (R8-R15) */
-    if (arg1 && arg1->is_register && arg1->reg1 >= REG_R8) return true;
-    if (arg2 && arg2->is_register && arg2->reg1 >= REG_R8) return true;
+    if (arg1 && arg1->is_register && arg1->reg1 >= X86_REG_R8) return true;
+    if (arg2 && arg2->is_register && arg2->reg1 >= X86_REG_R8) return true;
     
     return false;
 }
@@ -488,10 +493,10 @@ Bool asm_needs_rex_prefix(CAsmArg *arg1, CAsmArg *arg2) {
 U8 asm_calculate_rex_prefix(CAsmArg *arg1, CAsmArg *arg2) {
     U8 rex = 0x40;  /* Base REX prefix */
     
-    if (arg1 && arg1->is_register && arg1->reg1 >= REG_R8) {
+    if (arg1 && arg1->is_register && arg1->reg1 >= X86_REG_R8) {
         rex |= 0x01;  /* REX.B */
     }
-    if (arg2 && arg2->is_register && arg2->reg1 >= REG_R8) {
+    if (arg2 && arg2->is_register && arg2->reg1 >= X86_REG_R8) {
         rex |= 0x04;  /* REX.R */
     }
     
@@ -512,16 +517,16 @@ U8 asm_calculate_modrm_byte(CAsmArg *arg1, CAsmArg *arg2) {
         }
         
         /* Set RM field */
-        if (arg1->reg1 >= REG_R8) {
-            modrm |= (arg1->reg1 - REG_R8) & 7;
+        if (arg1->reg1 >= X86_REG_R8) {
+            modrm |= (arg1->reg1 - X86_REG_R8) & 7;
         } else {
             modrm |= arg1->reg1 & 7;
         }
     } else if (arg1 && arg1->is_register) {
         /* Register addressing */
         modrm |= 0xC0;  /* Direct register */
-        if (arg1->reg1 >= REG_R8) {
-            modrm |= (arg1->reg1 - REG_R8) & 7;
+        if (arg1->reg1 >= X86_REG_R8) {
+            modrm |= (arg1->reg1 - X86_REG_R8) & 7;
         } else {
             modrm |= arg1->reg1 & 7;
         }
@@ -529,8 +534,8 @@ U8 asm_calculate_modrm_byte(CAsmArg *arg1, CAsmArg *arg2) {
     
     /* Set REG field */
     if (arg2 && arg2->is_register) {
-        if (arg2->reg1 >= REG_R8) {
-            modrm |= ((arg2->reg1 - REG_R8) & 7) << 3;
+        if (arg2->reg1 >= X86_REG_R8) {
+            modrm |= ((arg2->reg1 - X86_REG_R8) & 7) << 3;
         } else {
             modrm |= (arg2->reg1 & 7) << 3;
         }
@@ -543,7 +548,7 @@ Bool asm_needs_sib_addressing(CAsmArg *arg) {
     if (!arg || !arg->is_memory) return false;
     
     /* SIB needed for complex addressing modes */
-    return arg->has_scale || (arg->reg1 == REG_RSP && arg->has_displacement);
+    return arg->has_scale || (arg->reg1 == X86_REG_RSP && arg->has_displacement);
 }
 
 I64 asm_calculate_instruction_size(CAsmArg *arg1, CAsmArg *arg2, U8 opcode) {
@@ -670,15 +675,31 @@ U8* assembly_generate_code(AssemblyContext *ctx, I64 *size) {
     
     *size = code_offset;
     
-    /* Copy to context buffer */
+    /* Copy to context buffer with proper bounds checking */
     printf("DEBUG: code_offset=%lld, buffer_capacity=%lld\n", code_offset, ctx->buffer_capacity);
+    
+    /* Critical fix: Ensure we don't exceed buffer capacity */
     if (code_offset > ctx->buffer_capacity) {
-        printf("DEBUG: Buffer capacity exceeded!\n");
+        printf("ERROR: Buffer capacity exceeded! code_offset=%lld, capacity=%lld\n", code_offset, ctx->buffer_capacity);
         free(machine_code);
         return NULL;
     }
     
-    memcpy(ctx->assembly_buffer, machine_code, code_offset);
+    /* Additional safety check: ensure code_offset is positive and reasonable */
+    if (code_offset <= 0 || code_offset > 2048) {
+        printf("ERROR: Invalid code_offset: %lld\n", code_offset);
+        free(machine_code);
+        return NULL;
+    }
+    
+    /* Safe memcpy with explicit size_t cast and bounds validation */
+    if (code_offset > SIZE_MAX) {
+        printf("ERROR: code_offset too large for memcpy: %lld\n", code_offset);
+        free(machine_code);
+        return NULL;
+    }
+    
+    memcpy(ctx->assembly_buffer, machine_code, (size_t)code_offset);
     ctx->buffer_size = code_offset;
     
     printf("DEBUG: Generated %lld bytes of machine code\n", code_offset);
